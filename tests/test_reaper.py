@@ -114,17 +114,27 @@ def test_reap_rejects_object_not_archived(tmp_path):
         r.reap_daily_archive(da_id)
 
 
-def test_reap_etag_mismatch_skips_not_raises(tmp_path):
+def test_reap_etag_mismatch_raises_hard_fail(tmp_path):
+    """P0 修复: ETag mismatch 必须硬失败 (PITR 链断裂风险)。
+    之前版本软失败 (跳过, 累计仍前进) → diff/xlog 可能在 full 未真正删除时继续推进。
+    修复后: 任何 ETag 不一致 → raise UnsafeDeleteError, 整个 daily_archive 不被部分删除。
+    """
     cat, obs, da_id = _seed(tmp_path)
-    # 修改 OBS 中对象的 ETag (模拟外部修改)
+    # 修改 catalog 中 full 对象的 ETag, 模拟外部改动
     cat._conn().execute(
         "UPDATE backup_objects SET obs_etag = 'changed-etag' WHERE obs_key LIKE 'i1/Db/%'",
     )
     r = Reaper(obs, cat)
-    summary = r.reap_daily_archive(da_id)
-    # full 对象 ETag 不匹配, 跳过; diff/xlog 仍正常删除
-    assert summary.deleted == 2
-    assert any("etag_mismatch" in f[1] for f in summary.failed)
+    from src.errors import UnsafeDeleteError
+    import pytest
+    with pytest.raises(UnsafeDeleteError, match="ETag 不匹配"):
+        r.reap_daily_archive(da_id)
+    # 关键: 抛错时, diff/xlog 也不能被删除 (硬失败语义)
+    objs_after = list(cat.get_objects_by_daily_archive(da_id))
+    not_deleted = [o for o in objs_after if o.status != "obs_deleted"]
+    assert len(not_deleted) == 3, (
+        f"硬失败后必须全部保持原状, 实际已删 {3 - len(not_deleted)} 个"
+    )
 
 
 def test_reap_depends_on_full(tmp_path):

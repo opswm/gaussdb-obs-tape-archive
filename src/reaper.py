@@ -117,24 +117,39 @@ class Reaper:
                         f"目标={cumulative_total['diff']})"
                     )
 
+            # ─── 门禁 5: ETag 二次校验 (P0 修复: 任何 mismatch/异常 → 硬失败) ───
+            # 之前: soft-fail (summary.failed.append + cumulative_archived += 1 + continue)
+            # 后果: 累计基准被"已尝试"对象污染, 顺序门禁失去意义, 可能把 full 未删成功的
+            #       diff/xlog 继续推进删除 → PITR 链断裂 + 静默数据丢失。
+            # 修复: 异常/ETag mismatch 直接 raise; 只有 delete_object 真正成功才累计。
             try:
-                # ─── 门禁 5: ETag 二次校验 ───
                 meta = self.obs.get_object_metadata(bucket, bo.obs_key)
-                if bo.obs_etag and meta.etag and meta.etag != bo.obs_etag:
-                    summary.failed.append((bo.obs_key, "etag_mismatch"))
-                    # ETag 不匹配视为"该对象已尝试处理", 阶段累计仍前进,
-                    # 避免阻断后续 diff/xlog 阶段。
-                    cumulative_archived[bo.backup_type] += 1
-                    continue
-
-                self.obs.delete_object(bucket, bo.obs_key)
+            except Exception as e:
+                raise UnsafeDeleteError(
+                    f"门禁 5 失败: 拉取 {bo.obs_key} 元数据异常: {e}"
+                ) from e
+            # 安全分支: 对象已不在 OBS (并发 reaper 或人工删), 视为已完成
+            if meta.not_found:
                 self.catalog.mark_backup_object_obs_deleted(bo.id, run_id)
                 summary.deleted += 1
                 cumulative_archived[bo.backup_type] += 1
+                continue
+            # ETag 必须严格一致 (任何不一致 = 数据被改, 拒绝删)
+            if bo.obs_etag and meta.etag and meta.etag != bo.obs_etag:
+                raise UnsafeDeleteError(
+                    f"门禁 5 失败: {bo.obs_key} ETag 不匹配 "
+                    f"(catalog={bo.obs_etag}, OBS={meta.etag})"
+                )
+
+            try:
+                self.obs.delete_object(bucket, bo.obs_key)
             except Exception as e:
-                summary.failed.append((bo.obs_key, str(e)))
-                # 异常也视为阶段尝试完成, 防止一个失败对象阻断整条链
-                cumulative_archived[bo.backup_type] += 1
+                raise UnsafeDeleteError(
+                    f"门禁 5 失败: 删除 {bo.obs_key} 异常: {e}"
+                ) from e
+            self.catalog.mark_backup_object_obs_deleted(bo.id, run_id)
+            summary.deleted += 1
+            cumulative_archived[bo.backup_type] += 1
 
         self.catalog.log_operation(
             operation="delete", run_id=run_id,
