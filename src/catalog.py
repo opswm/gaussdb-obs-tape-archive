@@ -1,0 +1,247 @@
+"""SQLite Catalog：所有模块共享的运行时真相。
+设计原则:
+- 单例连接管理 (线程局部)
+- schema 一次性 init, 后续操作仅用 prepared statements
+- 所有写操作同时记录 operation_log
+"""
+from __future__ import annotations
+
+import sqlite3
+import threading
+import uuid
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Iterable
+
+from src.errors import CatalogError
+
+
+# 8 张表 + 索引，与设计稿 2.1 节完全一致
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS instance_mappings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id     TEXT NOT NULL UNIQUE,
+    alias           TEXT NOT NULL UNIQUE,
+    display_name    TEXT NOT NULL,
+    description     TEXT,
+    bucket_name     TEXT NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS cluster_archive_policies (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id     TEXT NOT NULL UNIQUE,
+    archive_full    INTEGER NOT NULL DEFAULT 1,
+    archive_snapshot INTEGER NOT NULL DEFAULT 1,
+    archive_diff    INTEGER NOT NULL DEFAULT 1,
+    archive_xlog    INTEGER NOT NULL DEFAULT 1,
+    retention_days  INTEGER NOT NULL DEFAULT 90,
+    xlog_redundancy_hours REAL NOT NULL DEFAULT 6.0,
+    xlog_forward_hours REAL NOT NULL DEFAULT 6.0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (instance_id) REFERENCES instance_mappings(instance_id)
+);
+
+CREATE TABLE IF NOT EXISTS backup_objects (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    obs_key         TEXT NOT NULL UNIQUE,
+    instance_id     TEXT NOT NULL,
+    obs_size_bytes  BIGINT NOT NULL DEFAULT 0,
+    obs_last_modified TEXT NOT NULL,
+    backup_type     TEXT NOT NULL CHECK(backup_type IN ('full','diff','snapshot','xlog','metadata')),
+    parent_backup_dir TEXT NOT NULL,
+    restore_policy  TEXT NOT NULL DEFAULT 'normal' CHECK(restore_policy IN ('normal','archive_only')),
+    backup_date     TEXT NOT NULL,
+    backup_timestamp_ms BIGINT,
+    status          TEXT NOT NULL DEFAULT 'discovered' CHECK(status IN (
+        'discovered','queued_for_archive','archiving','archived','obs_deleted')),
+    tape_volume     TEXT,
+    tape_position   BIGINT,
+    daily_archive_id INTEGER,
+    checksum_sha256 TEXT,
+    verified_at     TEXT,
+    obs_deleted_at  TEXT,
+    obs_deleted_by  TEXT,
+    obs_etag        TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (instance_id) REFERENCES instance_mappings(instance_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bo_status ON backup_objects(status);
+CREATE INDEX IF NOT EXISTS idx_bo_backup_date ON backup_objects(backup_date);
+CREATE INDEX IF NOT EXISTS idx_bo_type ON backup_objects(backup_type);
+CREATE INDEX IF NOT EXISTS idx_bo_parent_dir ON backup_objects(parent_backup_dir);
+CREATE INDEX IF NOT EXISTS idx_bo_daily_archive ON backup_objects(daily_archive_id);
+CREATE INDEX IF NOT EXISTS idx_bo_instance ON backup_objects(instance_id);
+CREATE INDEX IF NOT EXISTS idx_bo_instance_date ON backup_objects(instance_id, backup_date);
+
+CREATE TABLE IF NOT EXISTS daily_archives (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id     TEXT NOT NULL,
+    archive_date    TEXT NOT NULL,
+    archive_filename TEXT NOT NULL,
+    backup_count    INTEGER NOT NULL DEFAULT 0,
+    total_size_bytes BIGINT NOT NULL DEFAULT 0,
+    compressed_size_bytes BIGINT NOT NULL DEFAULT 0,
+    full_count      INTEGER NOT NULL DEFAULT 0,
+    diff_count      INTEGER NOT NULL DEFAULT 0,
+    snapshot_count  INTEGER NOT NULL DEFAULT 0,
+    xlog_count      INTEGER NOT NULL DEFAULT 0,
+    full_dirs       TEXT,
+    diff_dirs       TEXT,
+    snapshot_dirs   TEXT,
+    xlog_lsn_start  TEXT,
+    xlog_lsn_end    TEXT,
+    xlog_time_start TEXT,
+    xlog_time_end   TEXT,
+    tape_volume     TEXT,
+    tape_position   BIGINT,
+    checksum_sha256 TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+        'pending','writing','on_tape','deleted')),
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    tape_written_at TEXT,
+    manifest_json   TEXT,
+    UNIQUE(instance_id, archive_date),
+    FOREIGN KEY (instance_id) REFERENCES instance_mappings(instance_id)
+);
+
+CREATE TABLE IF NOT EXISTS pitr_chains (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id     TEXT NOT NULL,
+    chain_id        TEXT NOT NULL UNIQUE,
+    base_full_dir   TEXT NOT NULL,
+    base_full_time  TEXT NOT NULL,
+    diff_dirs       TEXT NOT NULL DEFAULT '[]',
+    diff_count      INTEGER NOT NULL DEFAULT 0,
+    next_chain_id   TEXT,
+    chain_start_time TEXT NOT NULL,
+    chain_end_time  TEXT,
+    xlog_start_lsn  TEXT,
+    xlog_end_lsn    TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (instance_id) REFERENCES instance_mappings(instance_id)
+);
+
+CREATE TABLE IF NOT EXISTS restore_sessions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL UNIQUE,
+    target_time     TEXT NOT NULL,
+    required_daily_archives TEXT NOT NULL,
+    required_full_dir  TEXT,
+    required_diff_dirs TEXT,
+    xlog_redundancy_hours REAL NOT NULL DEFAULT 6.0,
+    xlog_forward_hours REAL NOT NULL DEFAULT 6.0,
+    status          TEXT NOT NULL DEFAULT 'retrieving' CHECK(status IN (
+        'retrieving','extracting','uploading','restored','cleaning','cleaned','failed')),
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    retrieved_at    TEXT,
+    restored_at     TEXT,
+    cleaned_at      TEXT,
+    error_message   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS restore_objects (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    restore_session_id  INTEGER NOT NULL,
+    backup_object_id    INTEGER,
+    daily_archive_id    INTEGER,
+    bucket_name         TEXT NOT NULL,
+    obs_key             TEXT NOT NULL,
+    object_size         INTEGER,
+    source_checksum     TEXT,
+    restored_etag       TEXT,
+    restored_last_modified TEXT,
+    restore_status      TEXT NOT NULL DEFAULT 'pending' CHECK(restore_status IN (
+        'pending','extracting','uploading','uploaded','verified','failed')),
+    cleanup_status      TEXT NOT NULL DEFAULT 'not_cleaned' CHECK(cleanup_status IN (
+        'not_cleaned','cleaning','cleaned','failed','skipped')),
+    overwrite_checked   INTEGER NOT NULL DEFAULT 0,
+    uploaded_by_session INTEGER NOT NULL DEFAULT 1,
+    error_message       TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    uploaded_at         TEXT,
+    verified_at         TEXT,
+    cleaned_at          TEXT,
+    FOREIGN KEY (restore_session_id) REFERENCES restore_sessions(id),
+    FOREIGN KEY (backup_object_id) REFERENCES backup_objects(id),
+    FOREIGN KEY (daily_archive_id) REFERENCES daily_archives(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_restore_objects_session ON restore_objects(restore_session_id);
+CREATE INDEX IF NOT EXISTS idx_restore_objects_cleanup ON restore_objects(cleanup_status);
+CREATE INDEX IF NOT EXISTS idx_restore_objects_key ON restore_objects(bucket_name, obs_key);
+
+CREATE TABLE IF NOT EXISTS operation_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation       TEXT NOT NULL,
+    run_id          TEXT NOT NULL,
+    target          TEXT,
+    detail          TEXT,
+    status          TEXT NOT NULL DEFAULT 'success',
+    error_message   TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_oplog_run ON operation_log(run_id);
+CREATE INDEX IF NOT EXISTS idx_oplog_op ON operation_log(operation);
+"""
+
+
+class Catalog:
+    def __init__(self, path: str) -> None:
+        self.path = Path(path)
+        self._local = threading.local()
+
+    def _conn(self) -> sqlite3.Connection:
+        """线程局部连接 (sqlite3 默认连接不可跨线程)。"""
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = sqlite3.connect(str(self.path), isolation_level=None, timeout=30.0)
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA foreign_keys=ON")
+            c.row_factory = sqlite3.Row
+            self._local.conn = c
+        return c
+
+    @contextmanager
+    def transaction(self):
+        """显式事务上下文。"""
+        c = self._conn()
+        c.execute("BEGIN")
+        try:
+            yield c
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+
+    def init_schema(self) -> None:
+        # NOTE: executescript() auto-commits any pending transaction, so we
+        # intentionally do NOT wrap it in self.transaction(); the script is
+        # idempotent (CREATE TABLE/INDEX IF NOT EXISTS) and any partial
+        # failure leaves the DB in a consistent state.
+        try:
+            self._conn().executescript(SCHEMA_SQL)
+        except sqlite3.Error as e:
+            raise CatalogError(f"Catalog schema init 失败: {e}") from e
+
+    def log_operation(
+        self, operation: str, run_id: str | None = None,
+        target: str | None = None, detail: str | None = None,
+        status: str = "success", error_message: str | None = None,
+    ) -> int:
+        if run_id is None:
+            run_id = str(uuid.uuid4())
+        with self.transaction() as c:
+            cur = c.execute(
+                """INSERT INTO operation_log (operation, run_id, target, detail, status, error_message)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (operation, run_id, target, detail, status, error_message),
+            )
+            return cur.lastrowid
