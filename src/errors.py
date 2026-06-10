@@ -38,5 +38,13 @@ class RestoreError(ArchiveError):
     """Restorer 流程失败。"""
 
 
+class SnapshotNotFoundError(RestoreError):
+    """Snapshot 独立恢复找不到对应 daily_archive 或未 on_tape。"""
+
+
+class PitrNotCapableError(RestoreError):
+    """实例策略不支持 PITR (缺 full / diff / xlog)。"""
+
+
 class CleanupSafetyError(RestoreError):
     """Cleaner 安全门禁未通过（按 restore_objects 清理时）。"""
