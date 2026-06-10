@@ -83,6 +83,10 @@ class Scanner:
 
         # 2. 实例级元数据 (总是扫描, restore_policy=archive_only)
         count += self._scan_instance_root(bucket, instance_id, now, age_days)
+
+        # P1-5: 扫描结束 → 重建 PITR 链 (基于 catalog 当前 backup_objects)
+        # 幂等, 每次扫完都重算, 不会留下旧 chain 残留
+        self._rebuild_pitr_chains(instance_id)
         return count
 
     def _scan_dir(self, bucket: str, instance_id: str, sub: str,
@@ -100,6 +104,64 @@ class Scanner:
             )
             count += 1
         return count
+
+    def _rebuild_pitr_chains(self, instance_id: str) -> None:
+        """P1-5: 扫描结束后统一重建 pitr_chains。
+        - 收集该 instance 所有 full base (按 ts_ms 升序)
+        - 对每两个相邻 base 之间的区间, 收集 diff
+        - 写入 pitr_chains (chain_end_time=NULL 表示当前 open)
+        - 幂等: 先清空该 instance 旧 chain
+        """
+        import json as _json
+        from datetime import datetime as _dt, timezone as _tz
+        conn = self.catalog._conn()
+        bases = list(conn.execute(
+            """SELECT DISTINCT parent_backup_dir, MAX(backup_timestamp_ms) AS ts_ms
+               FROM backup_objects
+               WHERE instance_id = ? AND backup_type = 'full'
+                 AND parent_backup_dir GLOB '[0-9]*'
+               GROUP BY parent_backup_dir
+               ORDER BY ts_ms""",
+            (instance_id,),
+        ).fetchall())
+        if not bases:
+            return
+        all_diffs = list(conn.execute(
+            """SELECT DISTINCT parent_backup_dir, MAX(backup_timestamp_ms) AS ts_ms
+               FROM backup_objects
+               WHERE instance_id = ? AND backup_type = 'diff'
+                 AND parent_backup_dir GLOB '[0-9]*'
+               GROUP BY parent_backup_dir
+               ORDER BY ts_ms""",
+            (instance_id,),
+        ).fetchall())
+        # 幂等: 清空旧 chain
+        conn.execute(
+            "DELETE FROM pitr_chains WHERE instance_id = ?",
+            (instance_id,),
+        )
+        for i, base in enumerate(bases):
+            chain_id = f"{instance_id}_chain_{base['parent_backup_dir']}"
+            start_ts = int(base["ts_ms"])
+            end_ts = int(bases[i + 1]["ts_ms"]) if i + 1 < len(bases) else None
+            # diffs 落在 (start_ts, end_ts] 区间:
+            # 当前 base 之后, 下一个 base 之前的差异增量
+            in_range = [d for d in all_diffs
+                        if start_ts < int(d["ts_ms"])
+                        and (end_ts is None or int(d["ts_ms"]) <= end_ts)]
+            diff_dirs = [d["parent_backup_dir"] for d in in_range]
+            start_dt = _dt.fromtimestamp(start_ts / 1000, tz=_tz.utc)
+            end_iso = (_dt.fromtimestamp(end_ts / 1000, tz=_tz.utc).isoformat()
+                       if end_ts else None)
+            conn.execute(
+                """INSERT INTO pitr_chains
+                   (chain_id, instance_id, base_full_dir, base_full_time,
+                    diff_dirs, diff_count, chain_start_time, chain_end_time)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (chain_id, instance_id, base["parent_backup_dir"],
+                 start_dt.isoformat(), _json.dumps(diff_dirs), len(diff_dirs),
+                 start_dt.isoformat(), end_iso),
+            )
 
     def _scan_log(self, bucket: str, instance_id: str,
                   now: datetime, age_days: int) -> int:
