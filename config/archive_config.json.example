@@ -1,0 +1,74 @@
+{
+  "_comment": "完整配置示例，复制到 archive_config.json 后填入真实 instance_id / 凭证。env:XXX 引用同名环境变量。",
+  "obs": {
+    "bucket_name": "dbsbucket-0-tj01-XXXX",
+    "endpoint": "https://obs.tj01.xxxxx.myhuaweicloud.com",
+    "access_key": "env:OBS_ACCESS_KEY",
+    "secret_key": "env:OBS_SECRET_KEY",
+    "concurrency": 8,
+    "part_size_mb": 10
+  },
+  "instances": [
+    {
+      "alias": "ncbs_busi",
+      "instance_id": "REPLACE_WITH_FULL_TENANT_INSTANCE_ID_NCBS_2c61167d2f1f42858bc2a719a1275eae_gbb87e99b3215e2ccc8e5f4779ecf715in08",
+      "display_name": "核心数据库集群",
+      "description": "银行核心交易系统数据库",
+      "enabled": true,
+      "archive_policy": {
+        "archive_full": true, "archive_snapshot": true,
+        "archive_diff": true, "archive_xlog": true,
+        "retention_days": 90,
+        "xlog_redundancy_hours": 6.0, "xlog_forward_hours": 6.0
+      }
+    },
+    {
+      "alias": "trgl_busi",
+      "instance_id": "REPLACE_WITH_FULL_TENANT_INSTANCE_ID_TRGL_2c61167d2f1f42858bc2a719a1275eae_faa76d88a2104d1bbb7d4e3668dbe612in14",
+      "display_name": "总账数据库集群",
+      "description": "银行总账系统数据库",
+      "enabled": true,
+      "archive_policy": {
+        "archive_full": true, "archive_snapshot": true,
+        "archive_diff": true, "archive_xlog": true,
+        "retention_days": 90,
+        "xlog_redundancy_hours": 6.0, "xlog_forward_hours": 6.0
+      }
+    },
+    {
+      "alias": "itps_busi",
+      "instance_id": "REPLACE_WITH_FULL_TENANT_INSTANCE_ID_ITPS_2c61167d2f1f42858bc2a719a1275eae_4e83389f4h3h64070de4c931c3497gcg2005",
+      "display_name": "柜面数据库集群",
+      "description": "柜面业务系统数据库",
+      "enabled": true,
+      "archive_policy": {
+        "archive_full": true, "archive_snapshot": true,
+        "archive_diff": true, "archive_xlog": false,
+        "retention_days": 90,
+        "xlog_redundancy_hours": 6.0, "xlog_forward_hours": 6.0
+      }
+    }
+  ],
+  "tape": {
+    "mode": "simulated",
+    "simulated_path": "/data/tapes",
+    "max_volume_size_gb": 12000,
+    "verify_after_write": true
+  },
+  "catalog": {
+    "path": "/data/catalog/gaussdb_archive.db",
+    "backup_enabled": true,
+    "backup_path": "/data/catalog/backups/",
+    "backup_retention_days": 90
+  },
+  "work_dir": "/data/archive_work",
+  "archive": {
+    "required_manual_confirm_for_delete": true,
+    "max_concurrent_pack_jobs": 3,
+    "daily_archive_format": "tar.gz",
+    "compression_level": 6
+  },
+  "restore": {
+    "local_work_retention_hours": 24
+  }
+}
