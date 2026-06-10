@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import uuid
@@ -528,3 +529,41 @@ class Catalog:
             tape_written_at=datetime.fromisoformat(r["tape_written_at"]) if r["tape_written_at"] else None,
             manifest_json=r["manifest_json"],
         )
+
+    # ─── pitr_chains ───
+    def upsert_pitr_chain(
+        self, chain_id: str, instance_id: str,
+        base_full_dir: str, base_full_time: datetime,
+        diff_dirs: list[str], chain_start_time: datetime,
+        chain_end_time: datetime | None = None,
+        next_chain_id: str | None = None,
+    ) -> None:
+        with self.transaction() as c:
+            c.execute(
+                """INSERT INTO pitr_chains
+                       (chain_id, instance_id, base_full_dir, base_full_time,
+                        diff_dirs, diff_count, next_chain_id,
+                        chain_start_time, chain_end_time)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(chain_id) DO UPDATE SET
+                       diff_dirs=excluded.diff_dirs, diff_count=excluded.diff_count,
+                       next_chain_id=excluded.next_chain_id,
+                       chain_end_time=excluded.chain_end_time""",
+                (chain_id, instance_id, base_full_dir,
+                 base_full_time.isoformat(),
+                 json.dumps(diff_dirs), len(diff_dirs), next_chain_id,
+                 chain_start_time.isoformat(),
+                 chain_end_time.isoformat() if chain_end_time else None),
+            )
+
+    def find_pitr_chain_at(
+        self, instance_id: str, target_time: datetime,
+    ) -> sqlite3.Row | None:
+        return self._conn().execute(
+            """SELECT * FROM pitr_chains
+               WHERE instance_id = ?
+                 AND chain_start_time <= ?
+                 AND (chain_end_time IS NULL OR chain_end_time >= ?)
+               ORDER BY chain_start_time DESC LIMIT 1""",
+            (instance_id, target_time.isoformat(), target_time.isoformat()),
+        ).fetchone()

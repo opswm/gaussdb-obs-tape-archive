@@ -183,3 +183,23 @@ def test_list_pending_daily_archives(tmp_catalog_path):
             cat.update_daily_archive_status(da_id, st)
     pending = list(cat.list_daily_archives_by_status("pending"))
     assert {p.archive_date for p in pending} == {"2026-06-08", "2026-06-10"}
+
+
+def test_pitr_chain_crud(tmp_catalog_path):
+    cat = Catalog(str(tmp_catalog_path))
+    cat.init_schema()
+    cat.upsert_instance("i1", "a1", "n", "", "b", True)
+
+    cat.upsert_pitr_chain(
+        chain_id="i1_chain_dir1",
+        instance_id="i1",
+        base_full_dir="dir1",
+        base_full_time=datetime(2026, 6, 1, 1, 0, 0),
+        diff_dirs=["dir2", "dir3"],
+        chain_start_time=datetime(2026, 6, 1, 1, 0, 0),
+        chain_end_time=datetime(2026, 6, 8, 1, 0, 0),
+    )
+    found = cat.find_pitr_chain_at(instance_id="i1", target_time=datetime(2026, 6, 5))
+    assert found is not None
+    assert found["base_full_dir"] == "dir1"
+    assert found["diff_count"] == 2
