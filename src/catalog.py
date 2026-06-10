@@ -567,3 +567,129 @@ class Catalog:
                ORDER BY chain_start_time DESC LIMIT 1""",
             (instance_id, target_time.isoformat(), target_time.isoformat()),
         ).fetchone()
+
+    # ─── restore_sessions ───
+    def create_restore_session(
+        self, session_id: str, target_time: datetime,
+        required_daily_archives: list[int],
+        required_full_dir: str | None = None,
+        required_diff_dirs: list[str] | None = None,
+        xlog_redundancy_hours: float = 6.0,
+        xlog_forward_hours: float = 6.0,
+    ) -> int:
+        with self.transaction() as c:
+            cur = c.execute(
+                """INSERT INTO restore_sessions
+                       (session_id, target_time, required_daily_archives,
+                        required_full_dir, required_diff_dirs,
+                        xlog_redundancy_hours, xlog_forward_hours)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (session_id, target_time.isoformat(),
+                 json.dumps(required_daily_archives),
+                 required_full_dir,
+                 json.dumps(required_diff_dirs or []),
+                 xlog_redundancy_hours, xlog_forward_hours),
+            )
+            return cur.lastrowid
+
+    def get_restore_session(self, session_id: str) -> sqlite3.Row | None:
+        return self._conn().execute(
+            "SELECT * FROM restore_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+
+    def update_restore_session_status(
+        self, session_id: str, new_status: str,
+        error_message: str | None = None,
+    ) -> None:
+        valid = {"retrieving", "extracting", "uploading", "restored",
+                 "cleaning", "cleaned", "failed"}
+        if new_status not in valid:
+            raise CatalogError(f"非法 restore_session 状态: {new_status}")
+        ts_col = {
+            "restored": "restored_at", "cleaned": "cleaned_at",
+            "retrieving": "retrieved_at",
+        }.get(new_status)
+        with self.transaction() as c:
+            if ts_col:
+                c.execute(
+                    f"""UPDATE restore_sessions
+                        SET status = ?, {ts_col} = datetime('now'),
+                            error_message = ?
+                        WHERE session_id = ?""",
+                    (new_status, error_message, session_id),
+                )
+            else:
+                c.execute(
+                    "UPDATE restore_sessions SET status = ?, error_message = ? WHERE session_id = ?",
+                    (new_status, error_message, session_id),
+                )
+
+    # ─── restore_objects ───
+    def add_restore_object(
+        self, restore_session_id: int, backup_object_id: int | None,
+        daily_archive_id: int | None, bucket_name: str, obs_key: str,
+        object_size: int | None = None, source_checksum: str | None = None,
+        restored_etag: str | None = None,
+        restored_last_modified: str | None = None,
+    ) -> int:
+        with self.transaction() as c:
+            cur = c.execute(
+                """INSERT INTO restore_objects
+                       (restore_session_id, backup_object_id, daily_archive_id,
+                        bucket_name, obs_key, object_size, source_checksum,
+                        restored_etag, restored_last_modified)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (restore_session_id, backup_object_id, daily_archive_id,
+                 bucket_name, obs_key, object_size, source_checksum,
+                 restored_etag, restored_last_modified),
+            )
+            return cur.lastrowid
+
+    def get_restore_object(self, rid: int) -> sqlite3.Row | None:
+        return self._conn().execute(
+            "SELECT * FROM restore_objects WHERE id = ?", (rid,)
+        ).fetchone()
+
+    def list_restore_objects_for_session(
+        self, session_id: str, cleanup_status: str | None = None,
+    ) -> Iterable[sqlite3.Row]:
+        sql = """SELECT ro.* FROM restore_objects ro
+                 JOIN restore_sessions rs ON ro.restore_session_id = rs.id
+                 WHERE rs.session_id = ?"""
+        params: list = [session_id]
+        if cleanup_status:
+            sql += " AND ro.cleanup_status = ?"
+            params.append(cleanup_status)
+        sql += " ORDER BY ro.id"
+        yield from self._conn().execute(sql, params).fetchall()
+
+    def mark_restore_object_cleaned(
+        self, rid: int, note: str = "ok",
+    ) -> None:
+        with self.transaction() as c:
+            c.execute(
+                """UPDATE restore_objects
+                   SET cleanup_status = 'cleaned', cleaned_at = datetime('now'),
+                       error_message = ?
+                   WHERE id = ?""",
+                (note, rid),
+            )
+
+    def update_restore_object_status(
+        self, rid: int, restore_status: str,
+        restored_etag: str | None = None,
+        restored_last_modified: str | None = None,
+    ) -> None:
+        with self.transaction() as c:
+            sets = ["restore_status = ?", "uploaded_at = datetime('now')"]
+            params: list = [restore_status]
+            if restored_etag:
+                sets.append("restored_etag = ?"); params.append(restored_etag)
+            if restored_last_modified:
+                sets.append("restored_last_modified = ?")
+                params.append(restored_last_modified)
+            params.append(rid)
+            c.execute(
+                f"UPDATE restore_objects SET {', '.join(sets)} WHERE id = ?",
+                params,
+            )

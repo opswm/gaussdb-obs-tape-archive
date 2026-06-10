@@ -3,6 +3,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from src.catalog import Catalog
 from src.models import BackupObject, DailyArchive, Policy
+from src.errors import CatalogError
 
 
 def test_init_creates_all_tables(tmp_catalog_path):
@@ -203,3 +204,80 @@ def test_pitr_chain_crud(tmp_catalog_path):
     assert found is not None
     assert found["base_full_dir"] == "dir1"
     assert found["diff_count"] == 2
+
+
+def test_restore_session_lifecycle(tmp_catalog_path):
+    cat = Catalog(str(tmp_catalog_path))
+    cat.init_schema()
+
+    sid = "uuid-test"
+    cat.create_restore_session(
+        session_id=sid,
+        target_time=datetime(2026, 6, 9, 14, 30),
+        required_daily_archives=[42, 43, 44],
+        required_full_dir="1780160839955",
+        required_diff_dirs=["1780177759671"],
+    )
+    s = cat.get_restore_session(sid)
+    assert s["status"] == "retrieving"
+    assert s["required_full_dir"] == "1780160839955"
+
+    cat.update_restore_session_status(sid, "restored")
+    s2 = cat.get_restore_session(sid)
+    assert s2["status"] == "restored"
+    assert s2["restored_at"] is not None
+
+
+def test_restore_object_lifecycle(tmp_catalog_path):
+    cat = Catalog(str(tmp_catalog_path))
+    cat.init_schema()
+    cat.upsert_instance("i1", "a1", "n", "", "b", True)
+    da_id = cat.upsert_daily_archive(DailyArchive(
+        instance_id="i1", archive_date="2026-06-09",
+        archive_filename="a1_2026-06-09.tar.gz",
+    ))
+    sid = "s1"
+    cat.create_restore_session(
+        session_id=sid, target_time=datetime(2026, 6, 9, 14, 30),
+        required_daily_archives=[da_id],
+    )
+    rs = cat.get_restore_session(sid)
+    rid = cat.add_restore_object(
+        restore_session_id=rs["id"], backup_object_id=None,
+        daily_archive_id=da_id, bucket_name="b",
+        obs_key="i1/Db/1780160839955/f.rch",
+        object_size=1024, source_checksum="abc",
+        restored_etag="etag-xyz",
+        restored_last_modified="2026-06-10T10:00:00+00:00",
+    )
+    obj = cat.get_restore_object(rid)
+    assert obj["uploaded_by_session"] == 1
+
+    cat.mark_restore_object_cleaned(rid, note="ok")
+    obj2 = cat.get_restore_object(rid)
+    assert obj2["cleanup_status"] == "cleaned"
+
+
+def test_list_restore_objects_for_session(tmp_catalog_path):
+    cat = Catalog(str(tmp_catalog_path))
+    cat.init_schema()
+    cat.upsert_instance("i1", "a1", "n", "", "b", True)
+    da_id = cat.upsert_daily_archive(DailyArchive(
+        instance_id="i1", archive_date="2026-06-09",
+        archive_filename="a1_2026-06-09.tar.gz",
+    ))
+    sid = "s2"
+    cat.create_restore_session(
+        session_id=sid, target_time=datetime(2026, 6, 9, 14, 30),
+        required_daily_archives=[da_id],
+    )
+    rs = cat.get_restore_session(sid)
+    for i in range(3):
+        cat.add_restore_object(
+            restore_session_id=rs["id"], backup_object_id=None,
+            daily_archive_id=da_id, bucket_name="b",
+            obs_key=f"i1/Db/dir{i}/f.rch",
+        )
+    objs = list(cat.list_restore_objects_for_session(sid))
+    assert len(objs) == 3
+    assert all(o["uploaded_by_session"] == 1 for o in objs)
