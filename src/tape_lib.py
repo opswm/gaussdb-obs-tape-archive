@@ -37,6 +37,9 @@ class TapeLibrary(ABC):
 
 
 class _SimulatedTapeLibrary(TapeLibrary):
+    # 排除 volume.meta 后再算 position / used
+    _META_NAME = "volume.meta"
+
     def __init__(self, base_path: str, max_volume_size_gb: int) -> None:
         self.base = Path(base_path)
         self.base.mkdir(parents=True, exist_ok=True)
@@ -61,11 +64,16 @@ class _SimulatedTapeLibrary(TapeLibrary):
                     pass
         return max_idx
 
+    def _data_files(self, vol_dir: Path) -> list[Path]:
+        """卷内数据文件列表 (排除 volume.meta)。"""
+        return [f for f in vol_dir.iterdir()
+                if f.is_file() and f.name != self._META_NAME]
+
     def _new_volume(self) -> str:
         vol = f"TAPE{self._next_vol_idx:03d}"
         self._next_vol_idx += 1
         (self.base / vol).mkdir(parents=True, exist_ok=True)
-        (self.base / vol / "volume.meta").write_text(json.dumps({
+        (self.base / vol / self._META_NAME).write_text(json.dumps({
             "volume_id": vol, "used_bytes": 0, "status": "active",
         }))
         self._current_used = 0
@@ -90,11 +98,14 @@ class _SimulatedTapeLibrary(TapeLibrary):
         dest = vol_dir / f"archive_{archive_id}_{src.name}"
         dest.write_bytes(data)
 
-        position = sum(f.stat().st_size for f in vol_dir.iterdir() if f.is_file() and f != dest)
+        # P0-2 修复: position 只算 data files, 排除 volume.meta
+        position = sum(f.stat().st_size for f in self._data_files(vol_dir)
+                       if f != dest)
+        # P0-4 修复: used = data files 总和 (与 quota 含义一致)
         self._current_used = position + size
 
-        # 更新 volume.meta
-        meta_path = vol_dir / "volume.meta"
+        # 更新 volume.meta (加锁模拟后续扩展)
+        meta_path = vol_dir / self._META_NAME
         meta = json.loads(meta_path.read_text())
         meta["used_bytes"] = self._current_used
         meta_path.write_text(json.dumps(meta))
@@ -110,17 +121,36 @@ class _SimulatedTapeLibrary(TapeLibrary):
 
     def read_archive(self, tape_volume: str, tape_position: int,
                      size_bytes: int, output_path: str) -> None:
-        # 模拟模式不按 offset 定位, 直接用 volume 内文件名
+        # P0-1 修复: 必须用 tape_volume + tape_position 定位
+        # 之前: 按 size 接近度找 (错位, 多个相同 size 文件会选错)
+        # 修复: 按 position 定位 (position 是写入时的累计字节偏移)
         vol_dir = self.base / tape_volume
-        # 找到体积最接近 size_bytes 的文件
-        candidates = sorted(
-            (f for f in vol_dir.iterdir()
-             if f.is_file() and f.name.startswith("archive_") and f.name.endswith(".tar.gz")),
-            key=lambda f: abs(f.stat().st_size - size_bytes),
-        )
-        if not candidates:
-            raise FileNotFoundError(f"磁带 {tape_volume} 无可读文件")
-        Path(output_path).write_bytes(candidates[0].read_bytes())
+        if not vol_dir.exists():
+            raise FileNotFoundError(f"磁带卷 {tape_volume} 不存在")
+        # 累计字节定位: 找到第一个 cumulative_size > tape_position 的文件
+        cumulative = 0
+        target = None
+        for f in sorted(self._data_files(vol_dir),
+                        key=lambda p: int(p.name.split("_")[1])
+                        if p.name.startswith("archive_") else 0):
+            fsize = f.stat().st_size
+            if cumulative <= tape_position < cumulative + fsize:
+                target = f
+                break
+            cumulative += fsize
+        if target is None:
+            raise FileNotFoundError(
+                f"磁带 {tape_volume} 找不到 position={tape_position} 的 archive "
+                f"(卷内累计 {cumulative} bytes)"
+            )
+        # 校验 size_bytes 与文件实际大小 (防止 catalog 与 tape 不一致)
+        actual_size = target.stat().st_size
+        if size_bytes > 0 and size_bytes != actual_size:
+            raise ValueError(
+                f"磁带 {tape_volume} position={tape_position} 大小不匹配: "
+                f"catalog 期望 {size_bytes}, 实际 {actual_size}"
+            )
+        Path(output_path).write_bytes(target.read_bytes())
 
     def list_volumes(self) -> list[str]:
         return sorted(p.name for p in self.base.iterdir() if p.is_dir() and p.name.startswith("TAPE"))
