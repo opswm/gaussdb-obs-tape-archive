@@ -49,3 +49,9 @@ def test_cluster_show_subcommand():
     assert args.command == "cluster"
     assert args.cluster_command == "show"
     assert args.cluster == "itps_busi"
+
+
+def test_scheduler_defines_weekly_job():
+    """确保 scheduler 模块暴露 weekly_archive_job。"""
+    from scheduler import weekly_archive_job
+    assert callable(weekly_archive_job)
