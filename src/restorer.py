@@ -190,6 +190,10 @@ class Restorer:
                     if f is None:
                         continue
                     key = member.name
+                    # P1-2 防护: archive_only (metadata 类型) 跳过恢复
+                    bo_pre = self.catalog.get_backup_object_by_key(key)
+                    if bo_pre and bo_pre.restore_policy == "archive_only":
+                        continue
                     meta = self.obs.get_object_metadata(bucket, key)
                     if not meta.not_found:
                         self.catalog.update_restore_session_status(
