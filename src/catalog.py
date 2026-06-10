@@ -318,6 +318,12 @@ class Catalog:
     # ─── backup_objects ───
     def upsert_backup_object(self, bo: BackupObject) -> int:
         with self.transaction() as c:
+            # P1 修复: obs_last_modified 统一归一为 UTC ISO 带时区, 避免与
+            # 链上带 TZ 的 base_full_time 字符串比较时 '+00:00' 与 naive 错位
+            lm = bo.obs_last_modified
+            if lm.tzinfo is None:
+                from datetime import timezone as _tz
+                lm = lm.replace(tzinfo=_tz.utc)
             cur = c.execute(
                 """INSERT INTO backup_objects
                        (obs_key, instance_id, obs_size_bytes, obs_last_modified,
@@ -330,7 +336,7 @@ class Catalog:
                        obs_etag=excluded.obs_etag,
                        updated_at=datetime('now')""",
                 (bo.obs_key, bo.instance_id, bo.obs_size_bytes,
-                 bo.obs_last_modified.isoformat(),
+                 lm.isoformat(),
                  bo.backup_type, bo.parent_backup_dir, bo.restore_policy,
                  bo.backup_date, bo.backup_timestamp_ms, bo.status, bo.obs_etag),
             )

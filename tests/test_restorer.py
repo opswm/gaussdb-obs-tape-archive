@@ -204,3 +204,49 @@ def test_plan_snapshot_restore_not_on_tape_rejected(tmp_path):
     )
     with pytest.raises(SnapshotNotFoundError, match="on_tape"):
         plan_snapshot_restore(cat, "tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", "1781000000000")
+
+
+def test_pitr_plan_xlog_boundary_tz_normalization(tmp_path):
+    """P1 修复: xlog 窗口边界 (== xlog_end) 必须包含。
+    历史 bug: obs_last_modified 存为 naive ISO, 而 base_full_time 为 TZ-aware,
+    字符串比较时 '2026-06-08T20:00:00' < '2026-06-08T20:00:00+00:00' (因 '+' < '0'),
+    导致 == xlog_end 的边界 xlog 漏判。
+    """
+    import datetime as dt
+    from src.models import Policy
+    from src.scanner import Scanner
+    cat = Catalog(str(tmp_path / "cat.db"))
+    cat.init_schema()
+    inst = "tenant_tz"
+    cat.upsert_instance(inst, "n", "n", "", "b1", True)
+    cat.upsert_policy(inst, Policy(
+        archive_full=True, archive_snapshot=False, archive_diff=True,
+        archive_xlog=True, retention_days=90,
+    ))
+    obs = ObsClient.create_mock()
+    # 注入 base (06-08 00:00)
+    obs._store[("b1", f"{inst}/Db/1780876800000/f.rch")] = (
+        50, dt.datetime(2026, 6, 8, 0, 0, 0), "e-f", b"",
+    )
+    Scanner(obs, cat).scan_instance(inst, cat.get_policy(inst))
+    # 注入 xlog 在窗口边界 == xlog_end (target 14:00 + 6h = 20:00)
+    obs._store[("b1", f"{inst}/Log/cn1/pg_xlog/{0:024d}/001/x.rch")] = (
+        10, dt.datetime(2026, 6, 8, 20, 0, 0), "e-x-edge", b"",
+    )
+    Scanner(obs, cat).scan_instance(inst, cat.get_policy(inst))
+    # 验证 obs_last_modified 存为 TZ-aware
+    r = cat._conn().execute(
+        "SELECT obs_last_modified FROM backup_objects "
+        "WHERE instance_id=? AND backup_type='xlog'",
+        (inst,),
+    ).fetchone()
+    assert "+00:00" in r["obs_last_modified"], (
+        f"应存 TZ-aware ISO, 实际 {r['obs_last_modified']}"
+    )
+    # plan target=14:00 → xlog_end=20:00, 边界 xlog 必须命中
+    r_inst = Restorer(obs, TapeLibrary.create_simulated(str(tmp_path / "t"), 1),
+                      cat, tmp_path / "wd")
+    plan = r_inst.plan(dt.datetime(2026, 6, 8, 14, 0, 0), inst)
+    assert plan["xlog_count"] == 1, (
+        f"边界 xlog 应 1 个, 实际 {plan['xlog_count']}"
+    )

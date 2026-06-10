@@ -108,6 +108,11 @@ class Restorer:
         base_full_time = datetime.fromisoformat(chain["base_full_time"])
         diff_dirs = json.loads(chain["diff_dirs"])
 
+        # P1 修复: xlog 窗口边界 TZ 归一, 避免 naive 与 TZ-aware 字符串比较错位
+        # base_full_time 来自 pitr_chains (TZ-aware), target_time 可能 naive
+        from datetime import timezone as _tz
+        if target_time.tzinfo is None:
+            target_time = target_time.replace(tzinfo=_tz.utc)
         xlog_start = base_full_time
         xlog_end = target_time + timedelta(hours=xlog_forward_hours)
 
