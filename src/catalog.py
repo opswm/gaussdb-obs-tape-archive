@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 from src.errors import CatalogError
-from src.models import Policy
+from src.models import BackupObject, Policy
 
 
 # 8 张表 + 索引，与设计稿 2.1 节完全一致
@@ -312,4 +312,102 @@ class Catalog:
             retention_days=r["retention_days"],
             xlog_redundancy_hours=r["xlog_redundancy_hours"],
             xlog_forward_hours=r["xlog_forward_hours"],
+        )
+
+    # ─── backup_objects ───
+    def upsert_backup_object(self, bo: BackupObject) -> int:
+        with self.transaction() as c:
+            cur = c.execute(
+                """INSERT INTO backup_objects
+                       (obs_key, instance_id, obs_size_bytes, obs_last_modified,
+                        backup_type, parent_backup_dir, restore_policy,
+                        backup_date, backup_timestamp_ms, status, obs_etag)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(obs_key) DO UPDATE SET
+                       obs_size_bytes=excluded.obs_size_bytes,
+                       obs_last_modified=excluded.obs_last_modified,
+                       obs_etag=excluded.obs_etag,
+                       updated_at=datetime('now')""",
+                (bo.obs_key, bo.instance_id, bo.obs_size_bytes,
+                 bo.obs_last_modified.isoformat(),
+                 bo.backup_type, bo.parent_backup_dir, bo.restore_policy,
+                 bo.backup_date, bo.backup_timestamp_ms, bo.status, bo.obs_etag),
+            )
+            return cur.lastrowid
+
+    def get_backup_object_by_key(self, obs_key: str) -> BackupObject | None:
+        r = self._conn().execute(
+            "SELECT * FROM backup_objects WHERE obs_key = ?", (obs_key,)
+        ).fetchone()
+        return self._row_to_bo(r) if r else None
+
+    def update_backup_object_status(self, bo_id: int, new_status: str) -> None:
+        # 校验状态机合法性
+        valid = {"discovered", "queued_for_archive", "archiving",
+                 "archived", "obs_deleted"}
+        if new_status not in valid:
+            raise CatalogError(f"非法 backup_object 状态: {new_status}")
+        with self.transaction() as c:
+            c.execute(
+                "UPDATE backup_objects SET status = ?, updated_at = datetime('now') WHERE id = ?",
+                (new_status, bo_id),
+            )
+
+    def list_backup_objects_by_status(
+        self, status: str, instance_id: str | None = None,
+    ) -> Iterable[BackupObject]:
+        sql = "SELECT * FROM backup_objects WHERE status = ?"
+        params: list = [status]
+        if instance_id:
+            sql += " AND instance_id = ?"
+            params.append(instance_id)
+        sql += " ORDER BY backup_date, obs_key"
+        for r in self._conn().execute(sql, params):
+            yield self._row_to_bo(r)
+
+    def set_backup_object_tape(
+        self, bo_id: int, tape_volume: str, tape_position: int,
+        checksum: str,
+    ) -> None:
+        with self.transaction() as c:
+            c.execute(
+                """UPDATE backup_objects
+                   SET tape_volume = ?, tape_position = ?, checksum_sha256 = ?,
+                       verified_at = datetime('now'), updated_at = datetime('now')
+                   WHERE id = ?""",
+                (tape_volume, tape_position, checksum, bo_id),
+            )
+
+    def mark_backup_object_obs_deleted(self, bo_id: int, run_id: str) -> None:
+        with self.transaction() as c:
+            c.execute(
+                """UPDATE backup_objects
+                   SET status = 'obs_deleted', obs_deleted_at = datetime('now'),
+                       obs_deleted_by = ?, updated_at = datetime('now')
+                   WHERE id = ?""",
+                (run_id, bo_id),
+            )
+
+    def get_backup_object(self, bo_id: int) -> BackupObject | None:
+        r = self._conn().execute(
+            "SELECT * FROM backup_objects WHERE id = ?", (bo_id,)
+        ).fetchone()
+        return self._row_to_bo(r) if r else None
+
+    def _row_to_bo(self, r: sqlite3.Row) -> BackupObject:
+        return BackupObject(
+            id=r["id"], obs_key=r["obs_key"], instance_id=r["instance_id"],
+            obs_size_bytes=r["obs_size_bytes"],
+            obs_last_modified=datetime.fromisoformat(r["obs_last_modified"]),
+            backup_type=r["backup_type"], parent_backup_dir=r["parent_backup_dir"],
+            restore_policy=r["restore_policy"], backup_date=r["backup_date"],
+            backup_timestamp_ms=r["backup_timestamp_ms"],
+            status=r["status"], tape_volume=r["tape_volume"],
+            tape_position=r["tape_position"],
+            daily_archive_id=r["daily_archive_id"],
+            checksum_sha256=r["checksum_sha256"],
+            verified_at=datetime.fromisoformat(r["verified_at"]) if r["verified_at"] else None,
+            obs_deleted_at=datetime.fromisoformat(r["obs_deleted_at"]) if r["obs_deleted_at"] else None,
+            obs_deleted_by=r["obs_deleted_by"],
+            obs_etag=r["obs_etag"],
         )
