@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 from src.errors import CatalogError
+from src.models import Policy
 
 
 # 8 张表 + 索引，与设计稿 2.1 节完全一致
@@ -245,3 +246,70 @@ class Catalog:
                 (operation, run_id, target, detail, status, error_message),
             )
             return cur.lastrowid
+
+    # ─── instance_mappings ───
+    def upsert_instance(
+        self, instance_id: str, alias: str, display_name: str,
+        description: str, bucket_name: str, enabled: bool,
+    ) -> None:
+        with self.transaction() as c:
+            c.execute(
+                """INSERT INTO instance_mappings
+                       (instance_id, alias, display_name, description, bucket_name, enabled)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(instance_id) DO UPDATE SET
+                       alias=excluded.alias, display_name=excluded.display_name,
+                       description=excluded.description, bucket_name=excluded.bucket_name,
+                       enabled=excluded.enabled, updated_at=datetime('now')""",
+                (instance_id, alias, display_name, description, bucket_name, int(enabled)),
+            )
+
+    def get_instance_by_alias(self, alias: str) -> sqlite3.Row | None:
+        return self._conn().execute(
+            "SELECT * FROM instance_mappings WHERE alias = ?", (alias,)
+        ).fetchone()
+
+    def list_enabled_instances(self) -> Iterable[sqlite3.Row]:
+        return self._conn().execute(
+            "SELECT * FROM instance_mappings WHERE enabled = 1 ORDER BY alias"
+        ).fetchall()
+
+    # ─── cluster_archive_policies ───
+    def upsert_policy(self, instance_id: str, policy: Policy) -> None:
+        with self.transaction() as c:
+            c.execute(
+                """INSERT INTO cluster_archive_policies
+                       (instance_id, archive_full, archive_snapshot, archive_diff,
+                        archive_xlog, retention_days, xlog_redundancy_hours, xlog_forward_hours)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(instance_id) DO UPDATE SET
+                       archive_full=excluded.archive_full,
+                       archive_snapshot=excluded.archive_snapshot,
+                       archive_diff=excluded.archive_diff,
+                       archive_xlog=excluded.archive_xlog,
+                       retention_days=excluded.retention_days,
+                       xlog_redundancy_hours=excluded.xlog_redundancy_hours,
+                       xlog_forward_hours=excluded.xlog_forward_hours,
+                       updated_at=datetime('now')""",
+                (instance_id, int(policy.archive_full), int(policy.archive_snapshot),
+                 int(policy.archive_diff), int(policy.archive_xlog),
+                 policy.retention_days, policy.xlog_redundancy_hours,
+                 policy.xlog_forward_hours),
+            )
+
+    def get_policy(self, instance_id: str) -> Policy:
+        r = self._conn().execute(
+            "SELECT * FROM cluster_archive_policies WHERE instance_id = ?",
+            (instance_id,),
+        ).fetchone()
+        if r is None:
+            raise CatalogError(f"集群 {instance_id} 无策略记录")
+        return Policy(
+            archive_full=bool(r["archive_full"]),
+            archive_snapshot=bool(r["archive_snapshot"]),
+            archive_diff=bool(r["archive_diff"]),
+            archive_xlog=bool(r["archive_xlog"]),
+            retention_days=r["retention_days"],
+            xlog_redundancy_hours=r["xlog_redundancy_hours"],
+            xlog_forward_hours=r["xlog_forward_hours"],
+        )
