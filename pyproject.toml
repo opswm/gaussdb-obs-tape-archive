@@ -1,0 +1,29 @@
+[project]
+name = "gaussdb-archive"
+version = "0.1.0"
+description = "GaussDB OBS backup archiver to IBM tape library"
+requires-python = ">=3.11"
+dependencies = [
+    "esdk-obs-python>=3.22",
+    "APScheduler>=3.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[project.scripts]
+gaussdb-archive = "main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
