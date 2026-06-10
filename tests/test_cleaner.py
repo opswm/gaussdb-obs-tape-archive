@@ -119,3 +119,28 @@ def test_cleanup_rejects_no_objects(tmp_path):
     c = Cleaner(obs, cat)
     with pytest.raises(CleanupSafetyError, match="没有 restore_objects"):
         c.cleanup(sid)
+
+
+def test_cleanup_failed_with_no_objects_marks_cleaned(tmp_path):
+    """P1 修复: session='failed' + restore_objects=空 → 允许 mark cleaned。
+    场景: execute 在 add_restore_object 之前 abort (e.g. "key 已存在"),
+    没产生 OBS 数据可清, 也不能让 session 永远卡 'failed'。
+    """
+    cat = Catalog(str(tmp_path / "cat.db"))
+    cat.init_schema()
+    cat.upsert_instance("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", "ncbs_busi", "n", "", "b1", True)
+    sid = "s-failed-empty"
+    cat.create_restore_session(
+        session_id=sid, target_time=dt.datetime(2026, 6, 9, 14, 30),
+        required_daily_archives=[], required_full_dir="d1",
+    )
+    # 模拟 execute abort 后状态
+    cat.update_restore_session_status(sid, "failed", error_message="key already exists")
+    obs = ObsClient.create_mock()
+    c = Cleaner(obs, cat)
+    summary = c.cleanup(sid)
+    assert summary.deleted == 0
+    assert summary.failed == []
+    sess = cat.get_restore_session(sid)
+    assert sess["status"] == "cleaned", f"应 cleaned, 实际 {sess['status']}"
+    assert "no restore_objects" in sess["error_message"]

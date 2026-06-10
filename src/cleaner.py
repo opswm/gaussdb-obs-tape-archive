@@ -38,22 +38,16 @@ class Cleaner:
 
         objs = list(self.catalog.list_restore_objects_for_session(session_id))
         if not objs:
-            raise CleanupSafetyError(
-                f"Session {session_id} 没有 restore_objects 清单, 拒绝清理")
-
-        self.catalog.update_restore_session_status(session_id, "cleaning")
-        summary = CleanupSummary()
-
-    def cleanup(self, session_id: str) -> CleanupSummary:
-        sess = self.catalog.get_restore_session(session_id)
-        if sess is None:
-            raise CleanupSafetyError(f"session {session_id} 不存在")
-        if sess["status"] in ("cleaning", "cleaned"):
-            raise CleanupSafetyError(
-                f"Session {session_id} 已经清理过, 状态: {sess['status']}")
-
-        objs = list(self.catalog.list_restore_objects_for_session(session_id))
-        if not objs:
+            # P1 修复: 空 restore_objects 时, 若 session 是 'failed' 状态
+            # (execute 在 add_restore_object 之前 abort), 允许 mark cleaned
+            # 而非无限期卡 'failed' (没有任何数据可清, 安全)
+            # 若 session 处于 'retrieving'/'extracting' 等更早状态, 仍拒绝
+            if sess["status"] == "failed":
+                self.catalog.update_restore_session_status(
+                    session_id, "cleaned",
+                    error_message="no restore_objects to clean (aborted before put)")
+                summary = CleanupSummary()
+                return summary
             raise CleanupSafetyError(
                 f"Session {session_id} 没有 restore_objects 清单, 拒绝清理")
 
