@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 from src.errors import CatalogError
-from src.models import BackupObject, Policy
+from src.models import BackupObject, DailyArchive, Policy
 
 
 # 8 张表 + 索引，与设计稿 2.1 节完全一致
@@ -410,4 +410,121 @@ class Catalog:
             obs_deleted_at=datetime.fromisoformat(r["obs_deleted_at"]) if r["obs_deleted_at"] else None,
             obs_deleted_by=r["obs_deleted_by"],
             obs_etag=r["obs_etag"],
+        )
+
+    # ─── daily_archives ───
+    def upsert_daily_archive(self, da: DailyArchive) -> int:
+        with self.transaction() as c:
+            cur = c.execute(
+                """INSERT INTO daily_archives
+                       (instance_id, archive_date, archive_filename,
+                        backup_count, total_size_bytes, compressed_size_bytes,
+                        full_count, diff_count, snapshot_count, xlog_count,
+                        full_dirs, diff_dirs, snapshot_dirs,
+                        xlog_lsn_start, xlog_lsn_end, xlog_time_start, xlog_time_end,
+                        tape_volume, tape_position, checksum_sha256, status,
+                        manifest_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(instance_id, archive_date) DO UPDATE SET
+                       archive_filename=excluded.archive_filename,
+                       backup_count=excluded.backup_count,
+                       total_size_bytes=excluded.total_size_bytes,
+                       compressed_size_bytes=excluded.compressed_size_bytes,
+                       full_count=excluded.full_count, diff_count=excluded.diff_count,
+                       snapshot_count=excluded.snapshot_count, xlog_count=excluded.xlog_count,
+                       full_dirs=excluded.full_dirs, diff_dirs=excluded.diff_dirs,
+                       snapshot_dirs=excluded.snapshot_dirs,
+                       xlog_lsn_start=excluded.xlog_lsn_start,
+                       xlog_lsn_end=excluded.xlog_lsn_end,
+                       xlog_time_start=excluded.xlog_time_start,
+                       xlog_time_end=excluded.xlog_time_end,
+                       tape_volume=excluded.tape_volume,
+                       tape_position=excluded.tape_position,
+                       checksum_sha256=excluded.checksum_sha256,
+                       status=excluded.status,
+                       manifest_json=excluded.manifest_json""",
+                (da.instance_id, da.archive_date, da.archive_filename,
+                 da.backup_count, da.total_size_bytes, da.compressed_size_bytes,
+                 da.full_count, da.diff_count, da.snapshot_count, da.xlog_count,
+                 da.full_dirs, da.diff_dirs, da.snapshot_dirs,
+                 da.xlog_lsn_start, da.xlog_lsn_end, da.xlog_time_start, da.xlog_time_end,
+                 da.tape_volume, da.tape_position, da.checksum_sha256, da.status,
+                 da.manifest_json),
+            )
+            if cur.lastrowid:
+                return cur.lastrowid
+            # ON CONFLICT 触发时 lastrowid 可能是 0，重新查
+            r = c.execute(
+                "SELECT id FROM daily_archives WHERE instance_id = ? AND archive_date = ?",
+                (da.instance_id, da.archive_date),
+            ).fetchone()
+            return r["id"]
+
+    def get_daily_archive(self, da_id: int) -> DailyArchive | None:
+        r = self._conn().execute(
+            "SELECT * FROM daily_archives WHERE id = ?", (da_id,)
+        ).fetchone()
+        return self._row_to_da(r) if r else None
+
+    def list_daily_archives_by_status(self, status: str) -> Iterable[DailyArchive]:
+        for r in self._conn().execute(
+            "SELECT * FROM daily_archives WHERE status = ? ORDER BY archive_date", (status,)
+        ).fetchall():
+            yield self._row_to_da(r)
+
+    def update_daily_archive_status(
+        self, da_id: int, new_status: str,
+        tape_volume: str | None = None, tape_position: int | None = None,
+        checksum_sha256: str | None = None,
+    ) -> None:
+        valid = {"pending", "writing", "on_tape", "deleted"}
+        if new_status not in valid:
+            raise CatalogError(f"非法 daily_archive 状态: {new_status}")
+        sets = ["status = ?"]
+        params: list = [new_status]
+        if new_status == "on_tape":
+            sets.append("tape_written_at = datetime('now')")
+        if tape_volume is not None:
+            sets.append("tape_volume = ?"); params.append(tape_volume)
+        if tape_position is not None:
+            sets.append("tape_position = ?"); params.append(tape_position)
+        if checksum_sha256 is not None:
+            sets.append("checksum_sha256 = ?"); params.append(checksum_sha256)
+        params.append(da_id)
+        with self.transaction() as c:
+            c.execute(f"UPDATE daily_archives SET {', '.join(sets)} WHERE id = ?", params)
+
+    def attach_object_to_daily_archive(self, bo: BackupObject, da_id: int) -> None:
+        if bo.id is None:
+            raise CatalogError("attach_object_to_daily_archive 要求 bo 已持久化")
+        with self.transaction() as c:
+            c.execute(
+                "UPDATE backup_objects SET daily_archive_id = ?, status = 'archiving', updated_at = datetime('now') WHERE id = ?",
+                (da_id, bo.id),
+            )
+
+    def get_objects_by_daily_archive(self, da_id: int) -> Iterable[BackupObject]:
+        for r in self._conn().execute(
+            "SELECT * FROM backup_objects WHERE daily_archive_id = ? ORDER BY backup_type, obs_key",
+            (da_id,),
+        ).fetchall():
+            yield self._row_to_bo(r)
+
+    def _row_to_da(self, r: sqlite3.Row) -> DailyArchive:
+        return DailyArchive(
+            id=r["id"], instance_id=r["instance_id"], archive_date=r["archive_date"],
+            archive_filename=r["archive_filename"], backup_count=r["backup_count"],
+            total_size_bytes=r["total_size_bytes"],
+            compressed_size_bytes=r["compressed_size_bytes"],
+            full_count=r["full_count"], diff_count=r["diff_count"],
+            snapshot_count=r["snapshot_count"], xlog_count=r["xlog_count"],
+            full_dirs=r["full_dirs"] or "[]", diff_dirs=r["diff_dirs"] or "[]",
+            snapshot_dirs=r["snapshot_dirs"] or "[]",
+            xlog_lsn_start=r["xlog_lsn_start"], xlog_lsn_end=r["xlog_lsn_end"],
+            xlog_time_start=r["xlog_time_start"], xlog_time_end=r["xlog_time_end"],
+            tape_volume=r["tape_volume"], tape_position=r["tape_position"],
+            checksum_sha256=r["checksum_sha256"], status=r["status"],
+            created_at=datetime.fromisoformat(r["created_at"]) if r["created_at"] else None,
+            tape_written_at=datetime.fromisoformat(r["tape_written_at"]) if r["tape_written_at"] else None,
+            manifest_json=r["manifest_json"],
         )

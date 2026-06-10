@@ -2,7 +2,7 @@
 import sqlite3
 from datetime import datetime, timedelta
 from src.catalog import Catalog
-from src.models import BackupObject, Policy
+from src.models import BackupObject, DailyArchive, Policy
 
 
 def test_init_creates_all_tables(tmp_catalog_path):
@@ -110,3 +110,76 @@ def test_list_pending_archives(tmp_catalog_path):
 
     pending = list(cat.list_backup_objects_by_status("queued_for_archive", instance_id="i1"))
     assert len(pending) == 2
+
+
+def test_daily_archive_unique_per_instance_date(tmp_catalog_path):
+    cat = Catalog(str(tmp_catalog_path))
+    cat.init_schema()
+    cat.upsert_instance("i1", "a1", "n", "", "b", True)
+
+    da = DailyArchive(
+        instance_id="i1", archive_date="2026-06-09",
+        archive_filename="a1_2026-06-09.tar.gz",
+    )
+    da_id = cat.upsert_daily_archive(da)
+
+    # 重复插入应 ON CONFLICT 走更新
+    da2 = DailyArchive(
+        instance_id="i1", archive_date="2026-06-09",
+        archive_filename="a1_2026-06-09.tar.gz",
+        backup_count=10, total_size_bytes=2048,
+    )
+    cat.upsert_daily_archive(da2)
+    loaded = cat.get_daily_archive(da_id)
+    assert loaded.backup_count == 10
+
+
+def test_daily_archive_attach_objects(tmp_catalog_path):
+    cat = Catalog(str(tmp_catalog_path))
+    cat.init_schema()
+    cat.upsert_instance("i1", "a1", "n", "", "b", True)
+    da_id = cat.upsert_daily_archive(DailyArchive(
+        instance_id="i1", archive_date="2026-06-09",
+        archive_filename="a1_2026-06-09.tar.gz",
+    ))
+
+    bo = BackupObject(
+        obs_key="i1/Db/1780160839955/f.rch", instance_id="i1",
+        obs_last_modified=datetime(2026, 6, 9, 0, 0, 0),
+        backup_type="full", parent_backup_dir="1780160839955",
+        backup_date="2026-06-09", backup_timestamp_ms=1780160839955,
+    )
+    bo_id = cat.upsert_backup_object(bo)
+    bo.id = bo_id
+    cat.attach_object_to_daily_archive(bo, da_id)
+    objs = list(cat.get_objects_by_daily_archive(da_id))
+    assert len(objs) == 1
+
+
+def test_daily_archive_status_transition(tmp_catalog_path):
+    cat = Catalog(str(tmp_catalog_path))
+    cat.init_schema()
+    cat.upsert_instance("i1", "a1", "n", "", "b", True)
+    da_id = cat.upsert_daily_archive(DailyArchive(
+        instance_id="i1", archive_date="2026-06-09",
+        archive_filename="a1_2026-06-09.tar.gz",
+    ))
+    cat.update_daily_archive_status(da_id, "writing", tape_volume="TAPE001", tape_position=0)
+    cat.update_daily_archive_status(da_id, "on_tape")
+    loaded = cat.get_daily_archive(da_id)
+    assert loaded.status == "on_tape"
+    assert loaded.tape_volume == "TAPE001"
+
+
+def test_list_pending_daily_archives(tmp_catalog_path):
+    cat = Catalog(str(tmp_catalog_path))
+    cat.init_schema()
+    cat.upsert_instance("i1", "a1", "n", "", "b", True)
+    for d, st in [("2026-06-08", "pending"), ("2026-06-09", "on_tape"), ("2026-06-10", "pending")]:
+        da_id = cat.upsert_daily_archive(DailyArchive(
+            instance_id="i1", archive_date=d, archive_filename=f"a1_{d}.tar.gz",
+        ))
+        if st != "pending":
+            cat.update_daily_archive_status(da_id, st)
+    pending = list(cat.list_daily_archives_by_status("pending"))
+    assert {p.archive_date for p in pending} == {"2026-06-08", "2026-06-10"}
