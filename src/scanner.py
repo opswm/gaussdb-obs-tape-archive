@@ -111,11 +111,11 @@ class Scanner:
         - 对每两个相邻 base 之间的区间, 收集 diff
         - 写入 pitr_chains (chain_end_time=NULL 表示当前 open)
         - 幂等: 先清空该 instance 旧 chain
+        - 原子: 整个 DELETE+INSERT 序列在单个 transaction() 内
         """
         import json as _json
         from datetime import datetime as _dt, timezone as _tz
-        conn = self.catalog._conn()
-        bases = list(conn.execute(
+        bases = list(self.catalog._conn().execute(
             """SELECT DISTINCT parent_backup_dir, MAX(backup_timestamp_ms) AS ts_ms
                FROM backup_objects
                WHERE instance_id = ? AND backup_type = 'full'
@@ -126,7 +126,7 @@ class Scanner:
         ).fetchall())
         if not bases:
             return
-        all_diffs = list(conn.execute(
+        all_diffs = list(self.catalog._conn().execute(
             """SELECT DISTINCT parent_backup_dir, MAX(backup_timestamp_ms) AS ts_ms
                FROM backup_objects
                WHERE instance_id = ? AND backup_type = 'diff'
@@ -135,33 +135,34 @@ class Scanner:
                ORDER BY ts_ms""",
             (instance_id,),
         ).fetchall())
-        # 幂等: 清空旧 chain
-        conn.execute(
-            "DELETE FROM pitr_chains WHERE instance_id = ?",
-            (instance_id,),
-        )
-        for i, base in enumerate(bases):
-            chain_id = f"{instance_id}_chain_{base['parent_backup_dir']}"
-            start_ts = int(base["ts_ms"])
-            end_ts = int(bases[i + 1]["ts_ms"]) if i + 1 < len(bases) else None
-            # diffs 落在 (start_ts, end_ts] 区间:
-            # 当前 base 之后, 下一个 base 之前的差异增量
-            in_range = [d for d in all_diffs
-                        if start_ts < int(d["ts_ms"])
-                        and (end_ts is None or int(d["ts_ms"]) <= end_ts)]
-            diff_dirs = [d["parent_backup_dir"] for d in in_range]
-            start_dt = _dt.fromtimestamp(start_ts / 1000, tz=_tz.utc)
-            end_iso = (_dt.fromtimestamp(end_ts / 1000, tz=_tz.utc).isoformat()
-                       if end_ts else None)
+        with self.catalog.transaction() as conn:
+            # 幂等: 清空旧 chain
             conn.execute(
-                """INSERT INTO pitr_chains
-                   (chain_id, instance_id, base_full_dir, base_full_time,
-                    diff_dirs, diff_count, chain_start_time, chain_end_time)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (chain_id, instance_id, base["parent_backup_dir"],
-                 start_dt.isoformat(), _json.dumps(diff_dirs), len(diff_dirs),
-                 start_dt.isoformat(), end_iso),
+                "DELETE FROM pitr_chains WHERE instance_id = ?",
+                (instance_id,),
             )
+            for i, base in enumerate(bases):
+                chain_id = f"{instance_id}_chain_{base['parent_backup_dir']}"
+                start_ts = int(base["ts_ms"])
+                end_ts = int(bases[i + 1]["ts_ms"]) if i + 1 < len(bases) else None
+                # diffs 落在 (start_ts, end_ts] 区间:
+                # 当前 base 之后, 下一个 base 之前的差异增量
+                in_range = [d for d in all_diffs
+                            if start_ts < int(d["ts_ms"])
+                            and (end_ts is None or int(d["ts_ms"]) <= end_ts)]
+                diff_dirs = [d["parent_backup_dir"] for d in in_range]
+                start_dt = _dt.fromtimestamp(start_ts / 1000, tz=_tz.utc)
+                end_iso = (_dt.fromtimestamp(end_ts / 1000, tz=_tz.utc).isoformat()
+                           if end_ts else None)
+                conn.execute(
+                    """INSERT INTO pitr_chains
+                       (chain_id, instance_id, base_full_dir, base_full_time,
+                        diff_dirs, diff_count, chain_start_time, chain_end_time)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (chain_id, instance_id, base["parent_backup_dir"],
+                     start_dt.isoformat(), _json.dumps(diff_dirs), len(diff_dirs),
+                     start_dt.isoformat(), end_iso),
+                )
 
     def _scan_log(self, bucket: str, instance_id: str,
                   now: datetime, age_days: int) -> int:
