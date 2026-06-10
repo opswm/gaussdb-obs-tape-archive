@@ -15,11 +15,11 @@ from src.obs_client import ObsClient
 def _seed(tmp_path):
     cat = Catalog(str(tmp_path / "cat.db"))
     cat.init_schema()
-    cat.upsert_instance("tenant123_inst456", "ncbs_busi", "n", "", "b1", True)
+    cat.upsert_instance("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", "ncbs_busi", "n", "", "b1", True)
 
     # 真实 daily_archive (FK 需要)
     da_id = cat.upsert_daily_archive(DailyArchive(
-        instance_id="tenant123_inst456", archive_date="2026-06-09",
+        instance_id="tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", archive_date="2026-06-09",
         archive_filename="ncbs_busi_2026-06-09.tar.gz", status="on_tape",
         checksum_sha256="sha",
     ))
@@ -33,8 +33,8 @@ def _seed(tmp_path):
     rs = cat.get_restore_session(sid)
 
     for i, key in enumerate([
-        "tenant123_inst456/Db/d1/a.rch",
-        "tenant123_inst456/Difference/d2/b.rch",
+        "tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2/Db/d1/a.rch",
+        "tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2/Difference/d2/b.rch",
     ]):
         cat.add_restore_object(
             restore_session_id=rs["id"],
@@ -45,18 +45,18 @@ def _seed(tmp_path):
         )
 
     obs = ObsClient.create_mock(initial_objects=[
-        ("b1", "tenant123_inst456/Db/d1/a.rch", 10,
+        ("b1", "tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2/Db/d1/a.rch", 10,
          dt.datetime(2026, 6, 10, 10, 0, 0), "etag-0"),
-        ("b1", "tenant123_inst456/Difference/d2/b.rch", 10,
+        ("b1", "tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2/Difference/d2/b.rch", 10,
          dt.datetime(2026, 6, 10, 10, 0, 0), "etag-1"),
     ])
 
     for key, btype, parent in [
-        ("tenant123_inst456/Db/d1/a.rch", "full", "d1"),
-        ("tenant123_inst456/Difference/d2/b.rch", "diff", "d2"),
+        ("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2/Db/d1/a.rch", "full", "d1"),
+        ("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2/Difference/d2/b.rch", "diff", "d2"),
     ]:
         bo_id = cat.upsert_backup_object(BackupObject(
-            obs_key=key, instance_id="tenant123_inst456",
+            obs_key=key, instance_id="tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2",
             obs_last_modified=dt.datetime(2026, 6, 10, 0, 0, 0),
             backup_type=btype, parent_backup_dir=parent,
             backup_date="2026-06-09", backup_timestamp_ms=1780160839955,
@@ -79,14 +79,23 @@ def test_cleanup_deletes_listed_objects_only(tmp_path):
     assert remaining == []
 
 
-def test_cleanup_etag_mismatch_aborts(tmp_path):
+def test_cleanup_etag_mismatch_records_failed_not_raises(tmp_path):
+    """P0 修复: ETag mismatch 改为记 failed + 跳过, 不再 raise 中断整 loop。
+    之前 raise 会让 session 永远卡 'cleaning'。
+    修复后: mismatch 对象记 failed, session 终态 'failed' (运维介入)。
+    """
     cat, obs, sid = _seed(tmp_path)
-    obs._store[("b1", "tenant123_inst456/Db/d1/a.rch")] = (
+    obs._store[("b1", "tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2/Db/d1/a.rch")] = (
         10, dt.datetime(2026, 6, 10, 10, 0, 0), "CHANGED", b"",
     )
     c = Cleaner(obs, cat)
-    with pytest.raises(CleanupSafetyError, match="ETag"):
-        c.cleanup(sid)
+    summary = c.cleanup(sid)
+    # 1 个对象 ETag 不匹配 → 记 failed, 不抛错
+    assert len(summary.failed) >= 1
+    assert any("ETag 已变化" in reason for _, reason in summary.failed)
+    # session 终态是 'failed' (有 failed), 不是 'cleaned' (卡 cleaning)
+    sess = cat.get_restore_session(sid)
+    assert sess["status"] == "failed", f"应有 failed 对象 → status=failed, 实际 {sess['status']}"
 
 
 def test_cleanup_rejects_already_cleaned(tmp_path):
@@ -100,7 +109,7 @@ def test_cleanup_rejects_already_cleaned(tmp_path):
 def test_cleanup_rejects_no_objects(tmp_path):
     cat = Catalog(str(tmp_path / "cat.db"))
     cat.init_schema()
-    cat.upsert_instance("tenant123_inst456", "ncbs_busi", "n", "", "b1", True)
+    cat.upsert_instance("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", "ncbs_busi", "n", "", "b1", True)
     sid = "s-empty"
     cat.create_restore_session(
         session_id=sid, target_time=dt.datetime(2026, 6, 9, 14, 30),
