@@ -18,3 +18,8 @@ config/archive_config.json   # 含真实凭证, 不入库
 *.sha256
 .env                          # 本地环境变量
 .DS_Store
+
+# OMC 插件临时状态 (filter-repo 2026-06-11 已从历史清除, 防止再次进入)
+.omc/
+.omc-*/
+.claude/
