@@ -28,7 +28,7 @@ from src.manifest import (
 from src.models import BackupObject, DailyArchive
 from src.obs_client import ObsClient
 from src.utils import (
-    atomic_write, ensure_utc_aware, format_beijing_short,
+    ensure_utc_aware, format_beijing_short,
     safe_rel_path, utc_to_beijing,
 )
 from src.week_boundary import (
@@ -112,7 +112,7 @@ class Packer:
                    OR (backup_type IN ('xlog','metadata')
                     AND obs_last_modified >= ? AND obs_last_modified < ?)
                  )""",
-            (instance_id, str(ws_ms), str(we_ms), ws_iso, we_iso),
+            (instance_id, ws_ms, we_ms, ws_iso, we_iso),
         ).fetchall())
         metadata_skipped = int(meta_rows[0]["n"]) if meta_rows else 0
 
@@ -204,20 +204,31 @@ class Packer:
         staging_metadata = staging / "metadata.json"
         write_metadata(manifest, staging_metadata)
 
-        # 6. tar.gz 打包 (原子写: 写 tmp 后 rename, 中途失败不毁旧 tar)
-        import io as _io
-        tar_buf = _io.BytesIO()
-        with tarfile.open(fileobj=tar_buf, mode="w:gz",
-                          compresslevel=self.compression_level) as tf:
-            for p in sorted(staging.rglob("*")):
-                if p.is_file():
-                    tf.add(p, arcname=str(p.relative_to(staging)))
-        tar_bytes = tar_buf.getvalue()
+        # 6. tar.gz 打包 (流式写临时文件, 完成后 rename — 原子, 中途失败不毁旧 tar)
+        import tempfile
         tar_path = self.archive_dir / tar_name
-        atomic_write(tar_path, tar_bytes)
+        target_dir = tar_path.parent
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(target_dir), prefix=".tmp.", suffix=".tar.gz",
+        )
+        try:
+            import os
+            with os.fdopen(fd, "wb") as f_out:
+                with tarfile.open(fileobj=f_out, mode="w:gz",
+                                  compresslevel=self.compression_level) as tf:
+                    for p in sorted(staging.rglob("*")):
+                        if p.is_file():
+                            tf.add(p, arcname=str(p.relative_to(staging)))
+            os.replace(tmp_path, tar_path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
         # 7. 算 SHA256 + 更新 manifest
-        archive_sha = hashlib.sha256(tar_path.read_bytes()).hexdigest()
+        archive_sha = self._sha256_file(tar_path)
         manifest["checksum_sha256"] = archive_sha
         manifest["totals"]["compressed_tar_bytes"] = tar_path.stat().st_size
         write_metadata(manifest, staging_metadata)

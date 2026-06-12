@@ -119,7 +119,7 @@ def test_plan_rejects_instance_without_xlog_policy(tmp_path):
 
 # ─────────────────── Tests: execute ───────────────────
 def test_execute_creates_restore_session_and_objects(tmp_path):
-    """execute 端到端: archive_dir 直接放 tar.gz, tar_path_override 仍兼容。"""
+    """execute 端到端: archive_dir 放 tar.gz, Restorer 直接读。"""
     cat, da_full, _ = _seed_full_pipeline(tmp_path)
     obs = ObsClient.create_mock()
     archive_dir = tmp_path / "archive"
@@ -140,8 +140,6 @@ def test_execute_creates_restore_session_and_objects(tmp_path):
 
     full_sha = hashlib.sha256(tar.read_bytes()).hexdigest()
 
-    # 把 da_diff 状态设成无需磁带回读: 我们直接清除 session 里的 da_diff
-    # 只保留 da_full 在 required_daily_archives 里
     cat._conn().execute(
         "UPDATE daily_archives SET checksum_sha256=?, status='archived' WHERE archive_date='2026-06-08'",
         (full_sha,),
@@ -157,7 +155,7 @@ def test_execute_creates_restore_session_and_objects(tmp_path):
         (_json.dumps([da_full]), sid),
     )
 
-    r.execute(sid, tar_path_override=tar)
+    r.execute(sid)
 
     ro = list(cat.list_restore_objects_for_session(sid))
     assert len(ro) >= 1

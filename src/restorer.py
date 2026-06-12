@@ -160,8 +160,7 @@ class Restorer:
         }
 
     # ─── PITR execute ───
-    def execute(self, session_id: str,
-                tar_path_override: Path | None = None) -> None:
+    def execute(self, session_id: str) -> None:
         if self.obs is None:
             raise RestoreError("execute 需要 obs_client (上传恢复对象到 OBS)")
         sess = self.catalog.get_restore_session(session_id)
@@ -173,16 +172,13 @@ class Restorer:
         for da_id in archive_ids:
             da = self.catalog.get_daily_archive(da_id)
             tar_path = self.work_dir / f"restore_{da.archive_filename}"
-            if tar_path_override and da.archive_date == "2026-06-08":
-                tar_path.write_bytes(Path(tar_path_override).read_bytes())
-            else:
-                src = self.archive_dir / da.archive_filename
-                if not src.exists():
-                    raise RestoreError(
-                        f"archive_dir 缺少 tar.gz: {src}")
-                shutil.copy2(src, tar_path)
+            src = self.archive_dir / da.archive_filename
+            if not src.exists():
+                raise RestoreError(
+                    f"archive_dir 缺少 tar.gz: {src}")
+            shutil.copy2(src, tar_path)
 
-            actual = hashlib.sha256(tar_path.read_bytes()).hexdigest()
+            actual = self._sha256_file(tar_path)
             if actual != da.checksum_sha256:
                 self.catalog.update_restore_session_status(
                     session_id, "failed",
@@ -238,3 +234,11 @@ class Restorer:
         if ins is None:
             raise RestoreError(f"未知 instance: {instance_id}")
         return ins["bucket_name"]
+
+    @staticmethod
+    def _sha256_file(p: Path) -> str:
+        h = hashlib.sha256()
+        with p.open("rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
