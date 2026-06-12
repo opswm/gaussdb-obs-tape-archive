@@ -19,9 +19,14 @@ def validate_policies(policies: list[Policy]) -> None:
             errors.append("archive_xlog=True 必须 archive_full=True")
         if p.archive_xlog and not p.archive_diff:
             errors.append("archive_xlog=True 必须 archive_diff=True")
+        if not 1 <= p.week_start_day <= 7:
+            errors.append(
+                f"week_start_day 必须是 1-7 (1=周一..7=周日), 得到 {p.week_start_day}"
+            )
         if errors:
             label = f"策略 #{idx} (full={p.archive_full}, snapshot={p.archive_snapshot}, "\
-                    f"diff={p.archive_diff}, xlog={p.archive_xlog})"
+                    f"diff={p.archive_diff}, xlog={p.archive_xlog}, "\
+                    f"week_start_day={p.week_start_day})"
             raise InvalidArchivePolicyError(f"{label} 违反依赖约束: " + "; ".join(errors))
 
 

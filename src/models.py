@@ -34,6 +34,8 @@ class Policy:
     retention_days: int = 90
     xlog_redundancy_hours: float = 6.0
     xlog_forward_hours: float = 6.0
+    # 周度归档起点日 (1=周一..7=周日), 默认 6=周六
+    week_start_day: int = 6
 
     def is_full_pitr_capable(self) -> bool:
         """完整 PITR 能力：full + diff + xlog 全开。"""

@@ -14,20 +14,20 @@ class InvalidArchivePolicyError(ArchiveError):
     """违反 1.4.2.1 策略依赖约束。"""
 
 
+class InvalidWeekStartDayError(InvalidArchivePolicyError):
+    """week_start_day 字段非法 (非 1-7)。"""
+
+
+class ArchiveDirNotFoundError(ArchiveError):
+    """archive_dir 配置的目录不存在或不可访问。"""
+
+
 class CatalogError(ArchiveError):
     """SQLite 读写或约束冲突。"""
 
 
 class ObsError(ArchiveError):
     """OBS API 调用失败。"""
-
-
-class TapeWriteError(ArchiveError):
-    """磁带写入或回读校验失败。"""
-
-    def __init__(self, msg: str, tape_position: int | None = None) -> None:
-        super().__init__(msg)
-        self.tape_position = tape_position
 
 
 class UnsafeDeleteError(ArchiveError):
@@ -39,7 +39,7 @@ class RestoreError(ArchiveError):
 
 
 class SnapshotNotFoundError(RestoreError):
-    """Snapshot 独立恢复找不到对应 daily_archive 或未 on_tape。"""
+    """Snapshot 独立恢复找不到对应 daily_archive 或未 archived。"""
 
 
 class PitrNotCapableError(RestoreError):

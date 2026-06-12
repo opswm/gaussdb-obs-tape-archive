@@ -38,6 +38,7 @@ def _write_cfg(tmp_path: Path, instances: list[dict]) -> Path:
         "tape": {"mode": "simulated",
                  "simulated_path": str(tmp_path / "tapes"),
                  "max_volume_size_gb": 10, "verify_after_write": True},
+        "archive_dir": str(tmp_path / "tape_mapping"),
         "catalog": {"path": str(tmp_path / "cat.db"),
                     "backup_enabled": False, "backup_path": "",
                     "backup_retention_days": 90},

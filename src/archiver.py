@@ -5,7 +5,7 @@ import hashlib
 from pathlib import Path
 
 from src.catalog import Catalog
-from src.errors import ArchiveError, TapeWriteError
+from src.errors import ArchiveError
 from src.tape_lib import TapeLibrary
 
 
@@ -30,12 +30,11 @@ class Archiver:
             result = self.tape_lib.write_archive(tar_path, archive_id=daily_archive_id)
         except Exception as e:
             self.catalog.update_daily_archive_status(daily_archive_id, "pending")
-            raise TapeWriteError(f"磁带写入失败: {e}") from e
+            raise ArchiveError(f"磁带写入失败: {e}") from e
 
         # 3. 校验 (verify_checksum 由 tape_lib 在 write_archive 内做回读并返回)
         if not result.verify_checksum:
-            raise TapeWriteError("磁带回读校验未通过 (verify_checksum 为空)",
-                                 tape_position=result.tape_position)
+            raise ArchiveError("磁带回读校验未通过 (verify_checksum 为空)")
 
         # 4. on_tape
         self.catalog.update_daily_archive_status(

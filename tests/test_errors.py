@@ -1,11 +1,10 @@
-"""所有项目内异常都应继承 ArchiveError 或其子类。"""
+"""错误类型层级存在性测试。"""
 from src.errors import (
-    ArchiveError,
-    InvalidArchivePolicyError,
-    UnsafeDeleteError,
+    ArchiveError, ConfigError, InvalidArchivePolicyError,
+    InvalidWeekStartDayError, ArchiveDirNotFoundError,
+    CatalogError, ObsError, UnsafeDeleteError,
+    RestoreError, SnapshotNotFoundError, PitrNotCapableError,
     CleanupSafetyError,
-    TapeWriteError,
-    RestoreError,
 )
 
 
@@ -16,7 +15,7 @@ def test_invalid_policy_is_archive_error():
 
 
 def test_unsafe_delete_is_archive_error():
-    err = UnsafeDeleteError("not on tape")
+    err = UnsafeDeleteError("not archived")
     assert isinstance(err, ArchiveError)
 
 
@@ -25,7 +24,17 @@ def test_cleanup_safety_is_restore_error():
     assert isinstance(err, RestoreError)
 
 
-def test_tape_write_includes_position():
-    err = TapeWriteError("verify failed", tape_position=12345)
-    assert isinstance(err, ArchiveError)
-    assert err.tape_position == 12345
+def test_policy_chain():
+    assert issubclass(InvalidWeekStartDayError, InvalidArchivePolicyError)
+    assert issubclass(InvalidWeekStartDayError, ArchiveError)
+
+
+def test_archive_dir_not_found_inherits_archive_error():
+    assert issubclass(ArchiveDirNotFoundError, ArchiveError)
+
+
+def test_restore_subclass_chain():
+    assert issubclass(SnapshotNotFoundError, RestoreError)
+    assert issubclass(PitrNotCapableError, RestoreError)
+    assert issubclass(CleanupSafetyError, RestoreError)
+    assert issubclass(RestoreError, ArchiveError)

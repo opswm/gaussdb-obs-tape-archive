@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.errors import ConfigError
+from src.errors import ArchiveDirNotFoundError, ConfigError
 from src.models import Policy
 
 
@@ -45,10 +45,19 @@ class InstanceConfig:
 
 @dataclass
 class TapeConfig:
+    """兼容旧字段: 仅保留以便读取历史配置, 实际不被使用。
+    新配置请使用 archive_dir 顶层字段。
+    """
     mode: str
     simulated_path: str
     max_volume_size_gb: int
     verify_after_write: bool = True
+
+
+@dataclass
+class ArchiveDirConfig:
+    """归档目录配置: 程序把 weekly tar.gz 写入此目录, 该目录即磁带库映射目录。"""
+    path: str
 
 
 @dataclass
@@ -76,8 +85,9 @@ class RestoreConfig:
 class AppConfig:
     obs: ObsConfig
     instances: list[InstanceConfig]
-    tape: TapeConfig
+    tape: TapeConfig | None  # 兼容旧字段, 实际不使用
     catalog: CatalogConfig
+    archive_dir: ArchiveDirConfig
     work_dir: str
     archive: ArchiveConfig
     restore: RestoreConfig
@@ -114,6 +124,7 @@ def load_config(path: str) -> AppConfig:
                 retention_days=int(p_raw.get("retention_days", 90)),
                 xlog_redundancy_hours=float(p_raw.get("xlog_redundancy_hours", 6.0)),
                 xlog_forward_hours=float(p_raw.get("xlog_forward_hours", 6.0)),
+                week_start_day=int(p_raw.get("week_start_day", 6)),
             )
             instances.append(InstanceConfig(
                 alias=ins["alias"], instance_id=ins["instance_id"],
@@ -121,12 +132,40 @@ def load_config(path: str) -> AppConfig:
                 enabled=bool(ins.get("enabled", True)), policy=pol,
             ))
 
-        t = raw["tape"]
-        tape = TapeConfig(
-            mode=t["mode"], simulated_path=t["simulated_path"],
-            max_volume_size_gb=int(t["max_volume_size_gb"]),
-            verify_after_write=bool(t.get("verify_after_write", True)),
-        )
+        # 兼容旧 "tape" 段 (可选, 实际不读取)
+        tape: TapeConfig | None = None
+        if "tape" in raw:
+            t = raw["tape"]
+            tape = TapeConfig(
+                mode=t["mode"], simulated_path=t["simulated_path"],
+                max_volume_size_gb=int(t["max_volume_size_gb"]),
+                verify_after_write=bool(t.get("verify_after_write", True)),
+            )
+
+        # 新归档目录 (必需, 替代旧 "tape" 段)
+        if "archive_dir" not in raw:
+            raise ConfigError(
+                "配置缺少必需字段: archive_dir (顶层, 字符串路径或 env:XXX 引用)"
+            )
+        archive_dir_raw = raw["archive_dir"]
+        if isinstance(archive_dir_raw, dict):
+            # 允许 { "path": "..." } 或 { "env": "..." } 形式
+            if "path" in archive_dir_raw:
+                archive_dir_path = _resolve_env(archive_dir_raw["path"])
+            elif "env" in archive_dir_raw:
+                archive_dir_path = os.environ.get(archive_dir_raw["env"], "")
+            else:
+                raise ConfigError(
+                    "archive_dir 必须是非空字符串, 或含 'path'/'env' 键的对象"
+                )
+        else:
+            archive_dir_path = _resolve_env(archive_dir_raw)
+        if not archive_dir_path or not archive_dir_path.strip():
+            raise ConfigError(
+                f"archive_dir 解析为空字符串, 请检查 env 变量是否设置或路径是否填写"
+            )
+        archive_dir = ArchiveDirConfig(path=archive_dir_path)
+
         c = raw["catalog"]
         catalog = CatalogConfig(
             path=c["path"], backup_enabled=bool(c.get("backup_enabled", False)),
@@ -161,6 +200,7 @@ def load_config(path: str) -> AppConfig:
 
     return AppConfig(
         obs=obs, instances=instances, tape=tape,
-        catalog=catalog, work_dir=raw["work_dir"],
+        catalog=catalog, archive_dir=archive_dir,
+        work_dir=raw["work_dir"],
         archive=archive, restore=restore,
     )
