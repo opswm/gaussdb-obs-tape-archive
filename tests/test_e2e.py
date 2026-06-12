@@ -91,6 +91,8 @@ def test_e2e_full_pipeline(tmp_path: Path):
          dt.datetime(2026, 6, 9, 0, 0, 0), "e6"),
     ])
     work_dir = tmp_path / "work"; work_dir.mkdir()
+    archive_dir = tmp_path / "tape_mapping"
+    archive_dir.mkdir()
 
     # 1. scan
     Scanner(obs, cat).scan_instance("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", cat.get_policy("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2"))
@@ -103,17 +105,32 @@ def test_e2e_full_pipeline(tmp_path: Path):
                   instance_id="tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2"):
         cat.update_backup_object_status(bo.id, "queued_for_archive")
 
-    # 2. pack
-    p = Packer(obs, cat, work_dir)
-    da = p.pack_daily("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", "2026-06-09")
-    assert da.archive_filename == "ncbs_busi_2026-06-09.tar.gz"
+    # 2. pack_weekly — 周度流水线: ncbs_busi 默认 week_start_day=6, 2026-06-09 周二
+    #    落在 2026-06-06 (周六) ~ 2026-06-13 (下周六) 窗口
+    p = Packer(obs, cat, work_dir, archive_dir)
+    # 让策略 week_start_day=6
+    from src.models import Policy as _Policy
+    cat.upsert_policy("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2",
+                      _Policy(archive_full=True, archive_snapshot=True,
+                              archive_diff=True, archive_xlog=True,
+                              week_start_day=6))
+    from src.week_boundary import compute_week_range as _cwr
+    from datetime import date as _date
+    week_start, week_end = _cwr(_date(2026, 6, 9), 6)
+    result = p.pack_weekly("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2",
+                            week_start, week_end)
+    assert result.archive_filename is not None
+    assert result.archive_filename.startswith("ncbs_busi_W")
+    da_id = cat._conn().execute(
+        "SELECT id FROM daily_archives ORDER BY id DESC LIMIT 1"
+    ).fetchone()["id"]
+    da = cat.get_daily_archive(da_id)
+    assert da.archive_filename == result.archive_filename
 
-    # 3. archive
-    archive_dir = tmp_path / "tape_mapping"
-    archive_dir.mkdir()
-    Archiver(str(archive_dir), cat).archive_to_tape(da.id, str(work_dir / da.archive_filename))
-    da_after = cat.get_daily_archive(da.id)
+    # 3. archive (过渡版 archiver 已经是 no-op, 验证 pack_weekly 已直接写 archive_dir)
+    da_after = cat.get_daily_archive(da_id)
     assert da_after.status == "archived"
+    assert da_after.checksum_sha256 is not None
 
     # 4. PITR 准备
     cat.upsert_pitr_chain(
