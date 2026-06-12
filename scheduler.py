@@ -2,6 +2,8 @@
 
 Scheduler 永远不调用 Reaper; Reaper 是单独的人工触发子命令。
 Reaper 涉及"删除线上数据", 必须人工二次确认。
+
+支持 --pack-all 模式: 逐周打包所有待处理周 (适合首次大规模导入)。
 """
 from __future__ import annotations
 
@@ -17,11 +19,15 @@ from src.obs_client import ObsClient
 from src.packer import Packer
 from src.policy import validate_policies
 from src.scanner import Scanner
+from src.storage_estimator import find_pending_weeks
 from src.week_boundary import compute_week_range
 
 
-def weekly_archive_job(config_path: str) -> None:
-    """周度流水线: scan → pack_weekly (per-cluster 按 week_start_day 算当前周)。"""
+def weekly_archive_job(config_path: str, pack_all: bool = False) -> None:
+    """周度流水线: scan → pack_weekly (per-cluster 按 week_start_day 算当前周)。
+
+    当 pack_all=True 时, Phase 3 改为逐周打包所有待处理周。
+    """
     log = logging.getLogger("gaussdb-archive.weekly")
     run_id = str(uuid.uuid4())
     cfg = load_config(config_path)
@@ -53,28 +59,59 @@ def weekly_archive_job(config_path: str) -> None:
                     "discovered", instance_id=ins.instance_id):
                 cat.update_backup_object_status(bo.id, "queued_for_archive")
 
-        # Phase 3: pack_weekly (per-cluster 当前周)
+        # Phase 3: pack_weekly (per-cluster)
         p = Packer(obs, cat, work_dir, archive_dir,
                    compression_level=cfg.archive.compression_level)
         packed_count = 0
         for ins in cfg.instances:
             if not ins.enabled:
                 continue
-            week_start, week_end = compute_week_range(
-                dt.date.today(), ins.policy.week_start_day,
-            )
-            try:
-                result = p.pack_weekly(ins.instance_id, week_start, week_end)
-                packed_count += 1
-                log.info(
-                    f"[{run_id}] packed {ins.alias} week={week_start}: "
-                    f"{result.archive_filename} "
-                    f"sha256={result.checksum_sha256[:12] if result.checksum_sha256 else 'N/A'}"
+
+            if pack_all:
+                # --pack-all: 逐周打包所有待处理周
+                weeks = find_pending_weeks(cat, ins.instance_id, ins.policy.week_start_day)
+                if not weeks:
+                    log.info(f"[{run_id}] {ins.alias}: 没有待打包的周")
+                    continue
+                log.info(f"[{run_id}] {ins.alias}: 发现 {len(weeks)} 个待打包周")
+                for ws, we in weeks:
+                    try:
+                        result = p.pack_weekly(ins.instance_id, ws, we)
+                        actual_sha = p._sha256_file(result.archive_path)
+                        if actual_sha != result.checksum_sha256:
+                            log.error(
+                                f"[{run_id}] SHA256 校验失败 {ins.alias} week={ws}: "
+                                f"expected={result.checksum_sha256[:12]}..., "
+                                f"actual={actual_sha[:12]}..."
+                            )
+                            continue
+                        packed_count += 1
+                        log.info(
+                            f"[{run_id}] packed {ins.alias} week={ws}: "
+                            f"{result.archive_filename} "
+                            f"sha256={result.checksum_sha256[:12] if result.checksum_sha256 else 'N/A'}"
+                        )
+                    except Exception as e:
+                        log.exception(
+                            f"pack failed for {ins.alias} week={ws}: {e}"
+                        )
+            else:
+                # 默认: 只打包当前周
+                week_start, week_end = compute_week_range(
+                    dt.date.today(), ins.policy.week_start_day,
                 )
-            except Exception as e:
-                log.exception(
-                    f"pack failed for {ins.alias} week={week_start}: {e}"
-                )
+                try:
+                    result = p.pack_weekly(ins.instance_id, week_start, week_end)
+                    packed_count += 1
+                    log.info(
+                        f"[{run_id}] packed {ins.alias} week={week_start}: "
+                        f"{result.archive_filename} "
+                        f"sha256={result.checksum_sha256[:12] if result.checksum_sha256 else 'N/A'}"
+                    )
+                except Exception as e:
+                    log.exception(
+                        f"pack failed for {ins.alias} week={week_start}: {e}"
+                    )
         log.info(f"[{run_id}] packed: {packed_count}")
         cat.log_operation("pack_weekly", run_id=run_id, status="success")
 
@@ -91,6 +128,6 @@ def weekly_archive_job(config_path: str) -> None:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
-    weekly_archive_job(
-        sys.argv[1] if len(sys.argv) > 1 else "config/archive_config.json"
-    )
+    pack_all = "--pack-all" in sys.argv
+    config_arg = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else "config/archive_config.json"
+    weekly_archive_job(config_arg, pack_all=pack_all)

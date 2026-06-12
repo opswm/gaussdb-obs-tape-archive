@@ -34,6 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--week-start", required=True,
                    help="周起始日 YYYY-MM-DD (reap 整周)")
     s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--yes", action="store_true",
+                   help="跳过确认, 直接执行删除 (危险操作)")
 
     s = sub.add_parser("restore-plan", help="生成 PITR 计划")
     s.add_argument("--cluster", required=True)
@@ -43,13 +45,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--cluster", required=True)
     s.add_argument("--target", required=True)
     s.add_argument("--session-id", required=True)
+    s.add_argument("--yes", action="store_true",
+                   help="跳过确认, 直接执行恢复")
 
     s = sub.add_parser("cleanup", help="清理恢复数据")
     s.add_argument("--session-id", required=True)
+    s.add_argument("--yes", action="store_true",
+                   help="跳过确认, 直接执行清理")
 
     s = sub.add_parser("status", help="查看状态")
     s.add_argument("--cluster", required=True)
     s.add_argument("--week-start", help="周起始日 YYYY-MM-DD, 不传则汇总")
+
+    s = sub.add_parser("pack-all-weeks", help="逐周打包所有待处理周 (适合首次大规模导入)")
+    s.add_argument("--cluster", required=True)
+    s.add_argument("--stop-on-error", action="store_true",
+                   help="任一周失败即中止 (默认: 记录错误并继续)")
 
     s = sub.add_parser("cluster", help="集群管理")
     ssub = s.add_subparsers(dest="cluster_command", required=True)

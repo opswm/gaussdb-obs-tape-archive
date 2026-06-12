@@ -31,6 +31,20 @@ def _archive_dir_or_die(cfg) -> Path:
     return p
 
 
+def _confirm_or_die(prompt: str, yes_flag: bool) -> None:
+    """如果 --yes 未设置, 交互式确认; 拒绝则 sys.exit(1)。"""
+    if yes_flag:
+        return
+    try:
+        answer = input(f"{prompt} [y/N]: ").strip().lower()
+    except EOFError:
+        print("非交互环境且未指定 --yes, 已取消。", file=sys.stderr)
+        sys.exit(1)
+    if answer not in ("y", "yes"):
+        print("已取消。", file=sys.stderr)
+        sys.exit(0)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO,
@@ -48,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "scan":
         from src.scanner import Scanner
+        from src.storage_estimator import estimate_pending
         obs = _build_obs(cfg)
         s = Scanner(obs, cat)
         for ins in cfg.instances:
@@ -55,6 +70,12 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             n = s.scan_instance(ins.instance_id, ins.policy)
             log.info(f"scanned {ins.alias}: {n} objects")
+        # Storage estimation after scan
+        archive_dir_path = Path(cfg.archive_dir.path)
+        estimate = estimate_pending(cat, cfg.instances, archive_dir_path)
+        print(estimate.format_display())
+        if estimate.warning:
+            log.warning(estimate.warning)
         return 0
 
     if args.command in ("pack", "pack-weekly"):
@@ -80,8 +101,61 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 0
 
+    if args.command == "pack-all-weeks":
+        from src.packer import Packer
+        from src.storage_estimator import find_pending_weeks
+        obs = _build_obs(cfg)
+        ins = next(i for i in cfg.instances if i.alias == args.cluster)
+        archive_dir = _archive_dir_or_die(cfg)
+        p = Packer(obs, cat, Path(cfg.work_dir), archive_dir,
+                   compression_level=cfg.archive.compression_level)
+
+        weeks = find_pending_weeks(cat, ins.instance_id, ins.policy.week_start_day)
+        if not weeks:
+            log.info(f"集群 {ins.alias}: 没有待打包的周")
+            return 0
+
+        log.info(f"集群 {ins.alias}: 发现 {len(weeks)} 个待打包周")
+        for ws, we in weeks:
+            log.info(f"  待打包: {ws} ~ {we}")
+        log.info("")
+
+        success_count = 0
+        fail_count = 0
+        for ws, we in weeks:
+            log.info(f"开始打包: {ws} ~ {we}")
+            try:
+                result = p.pack_weekly(ins.instance_id, ws, we)
+                # Verify SHA256 on disk
+                actual_sha = p._sha256_file(result.archive_path)
+                if actual_sha != result.checksum_sha256:
+                    raise ArchiveError(
+                        f"SHA256 校验失败: "
+                        f"expected={result.checksum_sha256[:12]}..., "
+                        f"actual={actual_sha[:12]}..."
+                    )
+                size_gb = result.archive_path.stat().st_size / 1e9
+                log.info(
+                    f"  OK {result.archive_filename} "
+                    f"({size_gb:.1f} GB, sha256={result.checksum_sha256[:12]}...)"
+                )
+                success_count += 1
+            except Exception as e:
+                log.error(f"  失败 {ws}~{we}: {e}")
+                fail_count += 1
+                if args.stop_on_error:
+                    log.error("--stop-on-error 已设置, 中止")
+                    return 1
+
+        log.info(f"完成: {success_count} 成功, {fail_count} 失败 (共 {len(weeks)} 周)")
+        return 0 if fail_count == 0 else 1
+
     if args.command == "reap":
         from src.reaper import Reaper
+        _confirm_or_die(
+            "即将删除 OBS 上的原始备份对象, 此操作不可逆。确认?",
+            args.yes,
+        )
         obs = _build_obs(cfg)
         r = Reaper(obs, cat)
         ins = next(i for i in cfg.instances if i.alias == args.cluster)
@@ -109,6 +183,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "restore":
         from src.restorer import Restorer
+        _confirm_or_die(
+            "即将上传数据到 OBS 进行恢复, 此操作会修改 OBS 内容。确认?",
+            args.yes,
+        )
         obs = _build_obs(cfg)
         archive_dir = _archive_dir_or_die(cfg)
         r = Restorer(obs, cat, Path(cfg.work_dir), archive_dir)
@@ -118,6 +196,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "cleanup":
         from src.cleaner import Cleaner
+        _confirm_or_die(
+            "即将删除 OBS 上的恢复临时对象, 确认?",
+            args.yes,
+        )
         obs = _build_obs(cfg)
         c = Cleaner(obs, cat)
         summary = c.cleanup(args.session_id)
