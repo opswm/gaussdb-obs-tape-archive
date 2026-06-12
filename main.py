@@ -17,7 +17,8 @@ from src.week_boundary import compute_week_range
 
 
 def _build_obs(cfg) -> ObsClient:
-    """生产实现走真实 SDK; CLI 默认走 mock, 方便本地测试。"""
+    """当前默认使用 Mock OBS (内存模拟)。
+    接真实 OBS 时替换为: ObsClient.create_real(...)"""
     return ObsClient.create_mock()
 
 
@@ -206,6 +207,36 @@ def main(argv: list[str] | None = None) -> int:
         log.info(f"cleaned session {args.session_id}: {summary}")
         return 0
 
+    if args.command == "cluster":
+        if args.cluster_command == "list":
+            for ins in cfg.instances:
+                print(
+                    f"{ins.alias:14s} {ins.instance_id:42s} "
+                    f"{ins.display_name:16s} enabled={ins.enabled}  "
+                    f"week_start_day={ins.policy.week_start_day}"
+                )
+            return 0
+        if args.cluster_command == "show":
+            ins = next(i for i in cfg.instances if i.alias == args.cluster)
+            print(f"alias: {ins.alias}")
+            print(f"instance_id: {ins.instance_id}")
+            print(f"display_name: {ins.display_name}")
+            print(f"bucket: {cfg.obs.bucket_name}")
+            print(f"enabled: {ins.enabled}")
+            print(f"")
+            print(f"策略:")
+            print(f"  archive_full: {ins.policy.archive_full}")
+            print(f"  archive_snapshot: {ins.policy.archive_snapshot}")
+            print(f"  archive_diff: {ins.policy.archive_diff}")
+            print(f"  archive_xlog: {ins.policy.archive_xlog}")
+            print(f"  retention_days: {ins.policy.retention_days}")
+            print(f"  xlog_redundancy_hours: {ins.policy.xlog_redundancy_hours}")
+            print(f"  xlog_forward_hours: {ins.policy.xlog_forward_hours}")
+            print(f"  week_start_day: {ins.policy.week_start_day}")
+            print(f"")
+            print(f"PITR 能力: {'✓ (full + diff + xlog 全开)' if ins.policy.is_full_pitr_capable() else '✗'}")
+            return 0
+
     if args.command == "status":
         from src.week_boundary import compute_week_range
         for ins in cfg.instances:
@@ -225,10 +256,10 @@ def main(argv: list[str] | None = None) -> int:
                     )
             else:
                 n_archived = sum(
-                    1 for _ in cat.list_daily_archives_by_status("archived")
+                    1 for _ in cat.list_daily_archives_by_status("archived", instance_id=ins.instance_id)
                 )
                 n_pending = sum(
-                    1 for _ in cat.list_daily_archives_by_status("pending")
+                    1 for _ in cat.list_daily_archives_by_status("pending", instance_id=ins.instance_id)
                 )
                 print(f"{ins.alias}: pending={n_pending} archived={n_archived}")
         return 0

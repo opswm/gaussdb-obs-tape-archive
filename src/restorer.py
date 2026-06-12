@@ -186,8 +186,10 @@ class Restorer:
                 raise RestoreError(f"tar 校验失败: {da.archive_date}")
 
             bucket = self._bucket(da.instance_id)
-            # CWE-22 防护: Python 3.12+ filter='data' 剥离 ../ 绝对路径 / symlink
-            # 'r:gz' 模式不直接传 filter, 用 gzip.open + TarFile(..., filter=) 替代
+            # CWE-22 防护: 使用 getmembers() + extractfile() 而非 extractall(),
+            # 每个 member.name 经过 safe_rel_path() 二次校验拒绝 ../ 与绝对路径.
+            # Python 3.14: tarfile.open() 不再接受 filter= 参数; extractall() 的
+            # filter 防御在此不适用, 因为代码逐文件 extractfile() 并自行校验路径.
             with tarfile.open(tar_path, "r:gz") as _tf:
                 for member in _tf.getmembers():
                     if not member.isfile():

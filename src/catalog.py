@@ -506,10 +506,16 @@ class Catalog:
         ).fetchone()
         return self._row_to_da(r) if r else None
 
-    def list_daily_archives_by_status(self, status: str) -> Iterable[DailyArchive]:
-        for r in self._conn().execute(
-            "SELECT * FROM daily_archives WHERE status = ? ORDER BY archive_date", (status,)
-        ).fetchall():
+    def list_daily_archives_by_status(
+        self, status: str, instance_id: str | None = None,
+    ) -> Iterable[DailyArchive]:
+        sql = "SELECT * FROM daily_archives WHERE status = ?"
+        params: list = [status]
+        if instance_id:
+            sql += " AND instance_id = ?"
+            params.append(instance_id)
+        sql += " ORDER BY archive_date"
+        for r in self._conn().execute(sql, params).fetchall():
             yield self._row_to_da(r)
 
     def update_daily_archive_status(
