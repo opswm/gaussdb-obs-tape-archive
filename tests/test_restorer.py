@@ -66,7 +66,7 @@ def _full_policy():
 def _da(instance_id, date, filename, sha):
     from src.models import DailyArchive
     return DailyArchive(instance_id=instance_id, archive_date=date,
-                        archive_filename=filename, status="on_tape",
+                        archive_filename=filename, status="archived",
                         checksum_sha256=sha)
 
 
@@ -81,8 +81,8 @@ def _bo(instance_id, key, btype, parent, date, ts_ms, lm, status):
 # ─────────────────── Tests: plan ───────────────────
 def test_plan_pitr_restore_generates_correct_set(tmp_path):
     cat, _, _ = _seed_full_pipeline(tmp_path)
-    r = Restorer(obs_client=None, tape_lib=None, catalog=cat,
-                 work_dir=tmp_path / "work")
+    r = Restorer(obs_client=None, catalog=cat,
+                 work_dir=tmp_path / "work", archive_dir=tmp_path / "archive")
     plan = r.plan(target_time=dt.datetime(2026, 6, 9, 14, 30),
                   instance_id="tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2")
     assert plan["required_full_dir"] == "1780160839955"
@@ -97,8 +97,8 @@ def test_plan_rejects_no_chain(tmp_path):
     cat.init_schema()
     cat.upsert_instance("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", "ncbs_busi", "核心", "", "b1", True)
     cat.upsert_policy("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", _full_policy())
-    r = Restorer(obs_client=None, tape_lib=None, catalog=cat,
-                 work_dir=tmp_path / "work")
+    r = Restorer(obs_client=None, catalog=cat,
+                 work_dir=tmp_path / "work", archive_dir=tmp_path / "archive")
     with pytest.raises(RestoreError, match="PITR 链"):
         r.plan(dt.datetime(2026, 6, 9, 14, 30), "tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2")
 
@@ -112,8 +112,8 @@ def test_plan_rejects_instance_without_xlog_policy(tmp_path):
         archive_full=True, archive_snapshot=True, archive_diff=True,
         archive_xlog=False, retention_days=90,
     ))
-    r = Restorer(obs_client=None, tape_lib=None, catalog=cat,
-                 work_dir=tmp_path / "work")
+    r = Restorer(obs_client=None, catalog=cat,
+                 work_dir=tmp_path / "work", archive_dir=tmp_path / "archive")
     with pytest.raises(PitrNotCapableError):
         r.plan(dt.datetime(2026, 6, 9, 14, 30), "tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2")
 
@@ -143,12 +143,12 @@ def test_execute_creates_restore_session_and_objects(tmp_path):
     # 把 da_diff 状态设成无需磁带回读: 我们直接清除 session 里的 da_diff
     # 只保留 da_full 在 required_daily_archives 里
     cat._conn().execute(
-        "UPDATE daily_archives SET checksum_sha256=?, status='on_tape' WHERE archive_date='2026-06-08'",
+        "UPDATE daily_archives SET checksum_sha256=?, status='archived' WHERE archive_date='2026-06-08'",
         (full_sha,),
     )
 
     # 让 session 只引用 da_full: 重新 plan 后, 手动改 required_daily_archives
-    r = Restorer(obs, tape_lib, cat, tmp_path / "work")
+    r = Restorer(obs, cat, tmp_path / "work", tmp_path / "archive")
     sid = r.plan(target_time=dt.datetime(2026, 6, 9, 14, 30),
                  instance_id="tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2")["session_id"]
     # 截断 daily_archives 到只剩 da_full
@@ -202,7 +202,7 @@ def test_plan_snapshot_restore_not_on_tape_rejected(tmp_path):
     cat._conn().execute(
         "UPDATE daily_archives SET status='pending' WHERE id=?", (da_full,),
     )
-    with pytest.raises(SnapshotNotFoundError, match="on_tape"):
+    with pytest.raises(SnapshotNotFoundError, match="archived"):
         plan_snapshot_restore(cat, "tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", "1781000000000")
 
 
@@ -244,8 +244,7 @@ def test_pitr_plan_xlog_boundary_tz_normalization(tmp_path):
         f"应存 TZ-aware ISO, 实际 {r['obs_last_modified']}"
     )
     # plan target=14:00 → xlog_end=20:00, 边界 xlog 必须命中
-    r_inst = Restorer(obs, TapeLibrary.create_simulated(str(tmp_path / "t"), 1),
-                      cat, tmp_path / "wd")
+    r_inst = Restorer(obs, cat, tmp_path / "wd", tmp_path / "archive")
     plan = r_inst.plan(dt.datetime(2026, 6, 8, 14, 0, 0), inst)
     assert plan["xlog_count"] == 1, (
         f"边界 xlog 应 1 个, 实际 {plan['xlog_count']}"

@@ -76,11 +76,11 @@ def test_pack_records_sha256_and_attaches_objects(tmp_path):
     p = Packer(obs, cat, tmp_path / "work")
     da = p.pack_daily(instance_id="i1", date="2026-06-09")
 
-    # 所有 backup_objects 应 status=archiving, daily_archive_id 关联
+    # 所有 backup_objects 应 attached 到 daily_archive, 单对象 SHA256 已记录
     bos = list(cat.get_objects_by_daily_archive(da.id))
     assert len(bos) == 3
     for bo in bos:
-        assert bo.status == "archiving"
+        assert bo.daily_archive_id == da.id
         assert bo.checksum_sha256 is not None  # 单对象 SHA256 已记录
 
 

@@ -109,10 +109,11 @@ def test_e2e_full_pipeline(tmp_path: Path):
     assert da.archive_filename == "ncbs_busi_2026-06-09.tar.gz"
 
     # 3. archive
-    tape = TapeLibrary.create_simulated(str(tmp_path / "tapes"), 10)
-    Archiver(tape, cat).archive_to_tape(da.id, str(work_dir / da.archive_filename))
+    archive_dir = tmp_path / "tape_mapping"
+    archive_dir.mkdir()
+    Archiver(str(archive_dir), cat).archive_to_tape(da.id, str(work_dir / da.archive_filename))
     da_after = cat.get_daily_archive(da.id)
-    assert da_after.status == "on_tape"
+    assert da_after.status == "archived"
 
     # 4. PITR 准备
     cat.upsert_pitr_chain(
@@ -127,7 +128,7 @@ def test_e2e_full_pipeline(tmp_path: Path):
 
     # 5. PITR plan (用全新目标 OBS)
     obs2 = ObsClient.create_mock()
-    restorer = Restorer(obs2, tape, cat, work_dir)
+    restorer = Restorer(obs2, cat, work_dir, archive_dir)
     plan = restorer.plan(target_time=dt.datetime(2026, 6, 9, 14, 30),
                          instance_id="tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2")
     assert plan["required_full_dir"] == "1780160839955"
@@ -161,8 +162,8 @@ def test_e2e_pitr_rejected_when_xlog_disabled(tmp_path: Path):
         archive_full=True, archive_snapshot=True, archive_diff=True,
         archive_xlog=False, retention_days=90,
     ))
-    r = Restorer(obs_client=None, tape_lib=None, catalog=cat,
-                 work_dir=tmp_path / "work")
+    r = Restorer(obs_client=None, catalog=cat,
+                 work_dir=tmp_path / "work", archive_dir=tmp_path / "archive")
     with pytest.raises(PitrNotCapableError):
         r.plan(target_time=dt.datetime(2026, 5, 1),
                instance_id="itps_tenant_8b3f9c1a_inst_9d2e4567b9f0c1a2")
@@ -199,7 +200,7 @@ def test_e2e_plan_snapshot_restore_works(tmp_path: Path):
     ))
     da_id = cat.upsert_daily_archive(DailyArchive(
         instance_id="tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", archive_date="2026-06-10",
-        archive_filename="ncbs_busi_2026-06-10.tar.gz", status="on_tape",
+        archive_filename="ncbs_busi_2026-06-10.tar.gz", status="archived",
         checksum_sha256="sha",
     ))
     bo_id = cat.upsert_backup_object(BackupObject(

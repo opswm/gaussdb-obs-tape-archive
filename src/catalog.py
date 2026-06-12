@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS cluster_archive_policies (
     retention_days  INTEGER NOT NULL DEFAULT 90,
     xlog_redundancy_hours REAL NOT NULL DEFAULT 6.0,
     xlog_forward_hours REAL NOT NULL DEFAULT 6.0,
+    week_start_day  INTEGER NOT NULL DEFAULT 6,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (instance_id) REFERENCES instance_mappings(instance_id)
@@ -60,9 +61,7 @@ CREATE TABLE IF NOT EXISTS backup_objects (
     backup_date     TEXT NOT NULL,
     backup_timestamp_ms BIGINT,
     status          TEXT NOT NULL DEFAULT 'discovered' CHECK(status IN (
-        'discovered','queued_for_archive','archiving','archived','obs_deleted')),
-    tape_volume     TEXT,
-    tape_position   BIGINT,
+        'discovered','queued_for_archive','archived','obs_deleted')),
     daily_archive_id INTEGER,
     checksum_sha256 TEXT,
     verified_at     TEXT,
@@ -81,11 +80,13 @@ CREATE INDEX IF NOT EXISTS idx_bo_parent_dir ON backup_objects(parent_backup_dir
 CREATE INDEX IF NOT EXISTS idx_bo_daily_archive ON backup_objects(daily_archive_id);
 CREATE INDEX IF NOT EXISTS idx_bo_instance ON backup_objects(instance_id);
 CREATE INDEX IF NOT EXISTS idx_bo_instance_date ON backup_objects(instance_id, backup_date);
+CREATE INDEX IF NOT EXISTS idx_bo_instance_type ON backup_objects(instance_id, backup_type);
 
 CREATE TABLE IF NOT EXISTS daily_archives (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     instance_id     TEXT NOT NULL,
     archive_date    TEXT NOT NULL,
+    archive_week_end TEXT,
     archive_filename TEXT NOT NULL,
     backup_count    INTEGER NOT NULL DEFAULT 0,
     total_size_bytes BIGINT NOT NULL DEFAULT 0,
@@ -94,6 +95,7 @@ CREATE TABLE IF NOT EXISTS daily_archives (
     diff_count      INTEGER NOT NULL DEFAULT 0,
     snapshot_count  INTEGER NOT NULL DEFAULT 0,
     xlog_count      INTEGER NOT NULL DEFAULT 0,
+    metadata_skipped_count INTEGER NOT NULL DEFAULT 0,
     full_dirs       TEXT,
     diff_dirs       TEXT,
     snapshot_dirs   TEXT,
@@ -101,17 +103,17 @@ CREATE TABLE IF NOT EXISTS daily_archives (
     xlog_lsn_end    TEXT,
     xlog_time_start TEXT,
     xlog_time_end   TEXT,
-    tape_volume     TEXT,
-    tape_position   BIGINT,
     checksum_sha256 TEXT,
     status          TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
-        'pending','writing','on_tape','deleted')),
+        'pending','archived')),
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    tape_written_at TEXT,
+    archived_at     TEXT,
     manifest_json   TEXT,
     UNIQUE(instance_id, archive_date),
     FOREIGN KEY (instance_id) REFERENCES instance_mappings(instance_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_da_instance_week ON daily_archives(instance_id, archive_date);
 
 CREATE TABLE IF NOT EXISTS pitr_chains (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -281,8 +283,9 @@ class Catalog:
             c.execute(
                 """INSERT INTO cluster_archive_policies
                        (instance_id, archive_full, archive_snapshot, archive_diff,
-                        archive_xlog, retention_days, xlog_redundancy_hours, xlog_forward_hours)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        archive_xlog, retention_days, xlog_redundancy_hours,
+                        xlog_forward_hours, week_start_day)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(instance_id) DO UPDATE SET
                        archive_full=excluded.archive_full,
                        archive_snapshot=excluded.archive_snapshot,
@@ -291,11 +294,12 @@ class Catalog:
                        retention_days=excluded.retention_days,
                        xlog_redundancy_hours=excluded.xlog_redundancy_hours,
                        xlog_forward_hours=excluded.xlog_forward_hours,
+                       week_start_day=excluded.week_start_day,
                        updated_at=datetime('now')""",
                 (instance_id, int(policy.archive_full), int(policy.archive_snapshot),
                  int(policy.archive_diff), int(policy.archive_xlog),
                  policy.retention_days, policy.xlog_redundancy_hours,
-                 policy.xlog_forward_hours),
+                 policy.xlog_forward_hours, policy.week_start_day),
             )
 
     def get_policy(self, instance_id: str) -> Policy:
@@ -313,6 +317,7 @@ class Catalog:
             retention_days=r["retention_days"],
             xlog_redundancy_hours=r["xlog_redundancy_hours"],
             xlog_forward_hours=r["xlog_forward_hours"],
+            week_start_day=r["week_start_day"],
         )
 
     # ─── backup_objects ───
@@ -350,8 +355,7 @@ class Catalog:
 
     def update_backup_object_status(self, bo_id: int, new_status: str) -> None:
         # 校验状态机合法性
-        valid = {"discovered", "queued_for_archive", "archiving",
-                 "archived", "obs_deleted"}
+        valid = {"discovered", "queued_for_archive", "archived", "obs_deleted"}
         if new_status not in valid:
             raise CatalogError(f"非法 backup_object 状态: {new_status}")
         with self.transaction() as c:
@@ -369,6 +373,40 @@ class Catalog:
             sql += " AND instance_id = ?"
             params.append(instance_id)
         sql += " ORDER BY backup_date, obs_key"
+        for r in self._conn().execute(sql, params):
+            yield self._row_to_bo(r)
+
+    def list_backup_objects_weekly(
+        self, instance_id: str, week_start_iso: str, week_end_iso: str,
+    ) -> Iterable[BackupObject]:
+        """返回本周窗口内的非元数据、非 archive_only 对象。
+        - full/diff/snapshot: 按 parent_backup_dir 时间戳 (ts_ms) 落在 [week_start, week_end)
+        - xlog: 按 obs_last_modified 落在 [week_start, week_end)
+        - metadata / archive_only: 过滤掉 (callers 自己处理 skip 计数)
+        """
+        sql = """SELECT * FROM backup_objects
+                 WHERE instance_id = ?
+                   AND status != 'obs_deleted'
+                   AND (restore_policy IS NULL OR restore_policy != 'archive_only')
+                   AND (
+                     (backup_type IN ('full','diff','snapshot')
+                      AND backup_timestamp_ms IS NOT NULL
+                      AND backup_timestamp_ms >= CAST(? AS BIGINT)
+                      AND backup_timestamp_ms <  CAST(? AS BIGINT))
+                     OR (backup_type = 'xlog'
+                      AND obs_last_modified >= ?
+                      AND obs_last_modified <  ?)
+                   )
+                 ORDER BY backup_type, parent_backup_dir, obs_key"""
+        # week_start_iso / week_end_iso are ISO strings; ts_ms comparison needs ms
+        from datetime import datetime as _dt
+        from src.utils import ensure_utc_aware
+        ws_dt = ensure_utc_aware(_dt.fromisoformat(week_start_iso))
+        we_dt = ensure_utc_aware(_dt.fromisoformat(week_end_iso))
+        ws_ms = int(ws_dt.timestamp() * 1000)
+        we_ms = int(we_dt.timestamp() * 1000)
+        params = [instance_id, str(ws_ms), str(we_ms),
+                  week_start_iso, week_end_iso]
         for r in self._conn().execute(sql, params):
             yield self._row_to_bo(r)
 
@@ -409,8 +447,7 @@ class Catalog:
             backup_type=r["backup_type"], parent_backup_dir=r["parent_backup_dir"],
             restore_policy=r["restore_policy"], backup_date=r["backup_date"],
             backup_timestamp_ms=r["backup_timestamp_ms"],
-            status=r["status"], tape_volume=r["tape_volume"],
-            tape_position=r["tape_position"],
+            status=r["status"],
             daily_archive_id=r["daily_archive_id"],
             checksum_sha256=r["checksum_sha256"],
             verified_at=datetime.fromisoformat(r["verified_at"]) if r["verified_at"] else None,
@@ -424,39 +461,42 @@ class Catalog:
         with self.transaction() as c:
             cur = c.execute(
                 """INSERT INTO daily_archives
-                       (instance_id, archive_date, archive_filename,
+                       (instance_id, archive_date, archive_week_end, archive_filename,
                         backup_count, total_size_bytes, compressed_size_bytes,
                         full_count, diff_count, snapshot_count, xlog_count,
+                        metadata_skipped_count,
                         full_dirs, diff_dirs, snapshot_dirs,
                         xlog_lsn_start, xlog_lsn_end, xlog_time_start, xlog_time_end,
-                        tape_volume, tape_position, checksum_sha256, status,
-                        manifest_json)
+                        checksum_sha256, status, manifest_json)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(instance_id, archive_date) DO UPDATE SET
+                       archive_week_end=excluded.archive_week_end,
                        archive_filename=excluded.archive_filename,
                        backup_count=excluded.backup_count,
                        total_size_bytes=excluded.total_size_bytes,
                        compressed_size_bytes=excluded.compressed_size_bytes,
                        full_count=excluded.full_count, diff_count=excluded.diff_count,
-                       snapshot_count=excluded.snapshot_count, xlog_count=excluded.xlog_count,
+                       snapshot_count=excluded.snapshot_count,
+                       xlog_count=excluded.xlog_count,
+                       metadata_skipped_count=excluded.metadata_skipped_count,
                        full_dirs=excluded.full_dirs, diff_dirs=excluded.diff_dirs,
                        snapshot_dirs=excluded.snapshot_dirs,
                        xlog_lsn_start=excluded.xlog_lsn_start,
                        xlog_lsn_end=excluded.xlog_lsn_end,
                        xlog_time_start=excluded.xlog_time_start,
                        xlog_time_end=excluded.xlog_time_end,
-                       tape_volume=excluded.tape_volume,
-                       tape_position=excluded.tape_position,
                        checksum_sha256=excluded.checksum_sha256,
                        status=excluded.status,
                        manifest_json=excluded.manifest_json""",
-                (da.instance_id, da.archive_date, da.archive_filename,
+                (da.instance_id, da.archive_date, da.archive_week_end,
+                 da.archive_filename,
                  da.backup_count, da.total_size_bytes, da.compressed_size_bytes,
                  da.full_count, da.diff_count, da.snapshot_count, da.xlog_count,
+                 da.metadata_skipped_count,
                  da.full_dirs, da.diff_dirs, da.snapshot_dirs,
-                 da.xlog_lsn_start, da.xlog_lsn_end, da.xlog_time_start, da.xlog_time_end,
-                 da.tape_volume, da.tape_position, da.checksum_sha256, da.status,
-                 da.manifest_json),
+                 da.xlog_lsn_start, da.xlog_lsn_end,
+                 da.xlog_time_start, da.xlog_time_end,
+                 da.checksum_sha256, da.status, da.manifest_json),
             )
             if cur.lastrowid:
                 return cur.lastrowid
@@ -481,20 +521,15 @@ class Catalog:
 
     def update_daily_archive_status(
         self, da_id: int, new_status: str,
-        tape_volume: str | None = None, tape_position: int | None = None,
         checksum_sha256: str | None = None,
     ) -> None:
-        valid = {"pending", "writing", "on_tape", "deleted"}
+        valid = {"pending", "archived"}
         if new_status not in valid:
             raise CatalogError(f"非法 daily_archive 状态: {new_status}")
         sets = ["status = ?"]
         params: list = [new_status]
-        if new_status == "on_tape":
-            sets.append("tape_written_at = datetime('now')")
-        if tape_volume is not None:
-            sets.append("tape_volume = ?"); params.append(tape_volume)
-        if tape_position is not None:
-            sets.append("tape_position = ?"); params.append(tape_position)
+        if new_status == "archived":
+            sets.append("archived_at = datetime('now')")
         if checksum_sha256 is not None:
             sets.append("checksum_sha256 = ?"); params.append(checksum_sha256)
         params.append(da_id)
@@ -506,7 +541,7 @@ class Catalog:
             raise CatalogError("attach_object_to_daily_archive 要求 bo 已持久化")
         with self.transaction() as c:
             c.execute(
-                "UPDATE backup_objects SET daily_archive_id = ?, status = 'archiving', updated_at = datetime('now') WHERE id = ?",
+                "UPDATE backup_objects SET daily_archive_id = ?, updated_at = datetime('now') WHERE id = ?",
                 (da_id, bo.id),
             )
 
@@ -517,22 +552,38 @@ class Catalog:
         ).fetchall():
             yield self._row_to_bo(r)
 
+    def list_weekly_archives_in_range(
+        self, instance_id: str, start_iso: str, end_iso: str,
+    ) -> Iterable[DailyArchive]:
+        """列出 (instance, archive_date) 落在 [start, end) 区间内的 weekly_archives。
+        start/end 为 ISO date 字符串 'YYYY-MM-DD'。
+        """
+        for r in self._conn().execute(
+            """SELECT * FROM daily_archives
+               WHERE instance_id = ?
+                 AND archive_date >= ? AND archive_date < ?
+               ORDER BY archive_date""",
+            (instance_id, start_iso, end_iso),
+        ).fetchall():
+            yield self._row_to_da(r)
+
     def _row_to_da(self, r: sqlite3.Row) -> DailyArchive:
         return DailyArchive(
             id=r["id"], instance_id=r["instance_id"], archive_date=r["archive_date"],
+            archive_week_end=r["archive_week_end"],
             archive_filename=r["archive_filename"], backup_count=r["backup_count"],
             total_size_bytes=r["total_size_bytes"],
             compressed_size_bytes=r["compressed_size_bytes"],
             full_count=r["full_count"], diff_count=r["diff_count"],
             snapshot_count=r["snapshot_count"], xlog_count=r["xlog_count"],
+            metadata_skipped_count=r["metadata_skipped_count"],
             full_dirs=r["full_dirs"] or "[]", diff_dirs=r["diff_dirs"] or "[]",
             snapshot_dirs=r["snapshot_dirs"] or "[]",
             xlog_lsn_start=r["xlog_lsn_start"], xlog_lsn_end=r["xlog_lsn_end"],
             xlog_time_start=r["xlog_time_start"], xlog_time_end=r["xlog_time_end"],
-            tape_volume=r["tape_volume"], tape_position=r["tape_position"],
             checksum_sha256=r["checksum_sha256"], status=r["status"],
             created_at=datetime.fromisoformat(r["created_at"]) if r["created_at"] else None,
-            tape_written_at=datetime.fromisoformat(r["tape_written_at"]) if r["tape_written_at"] else None,
+            archived_at=datetime.fromisoformat(r["archived_at"]) if r["archived_at"] else None,
             manifest_json=r["manifest_json"],
         )
 

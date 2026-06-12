@@ -27,10 +27,10 @@ class Reaper:
         if da is None:
             raise UnsafeDeleteError(f"daily_archive {daily_archive_id} 不存在")
 
-        # ─── 门禁 1: daily_archive 状态 ───
-        if da.status != "on_tape":
+        # ─── 门禁 1: daily_archive 状态 (新模型: pending/archived 二态) ───
+        if da.status != "archived":
             raise UnsafeDeleteError(
-                f"daily_archive {da.archive_date} 状态为 {da.status}, 必须 on_tape")
+                f"daily_archive {da.archive_date} 状态为 {da.status}, 必须 archived")
 
         objs = list(self.catalog.get_objects_by_daily_archive(daily_archive_id))
 

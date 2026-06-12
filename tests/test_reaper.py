@@ -20,8 +20,7 @@ def _seed(tmp_path, *, with_full=True, with_diff=True, with_xlog=True):
     da_id = cat.upsert_daily_archive(DailyArchive(
         instance_id="i1", archive_date="2026-06-09",
         archive_filename="ncbs_busi_2026-06-09.tar.gz",
-        status="on_tape", tape_volume="TAPE001", tape_position=0,
-        checksum_sha256="da-checksum",
+        status="archived", checksum_sha256="da-checksum",
     ))
 
     objects = []
@@ -92,21 +91,22 @@ def test_reap_deletes_all_objects(tmp_path):
     assert summary.failed == []
 
 
-def test_reap_rejects_non_on_tape(tmp_path):
+def test_reap_rejects_non_archived(tmp_path):
     cat, obs, da_id = _seed(tmp_path)
-    cat.update_daily_archive_status(da_id, "writing")
+    # pending 状态不能 reap
+    cat.update_daily_archive_status(da_id, "pending")
     r = Reaper(obs, cat)
     from src.errors import UnsafeDeleteError
     import pytest
-    with pytest.raises(UnsafeDeleteError, match="on_tape"):
+    with pytest.raises(UnsafeDeleteError, match="archived"):
         r.reap_daily_archive(da_id)
 
 
 def test_reap_rejects_object_not_archived(tmp_path):
     cat, obs, da_id = _seed(tmp_path)
-    # 把第一个对象状态改回 archiving
+    # 把第一个对象状态改回 queued_for_archive (非 archived)
     objs = list(cat.get_objects_by_daily_archive(da_id))
-    cat.update_backup_object_status(objs[0].id, "archiving")
+    cat.update_backup_object_status(objs[0].id, "queued_for_archive")
     r = Reaper(obs, cat)
     from src.errors import UnsafeDeleteError
     import pytest

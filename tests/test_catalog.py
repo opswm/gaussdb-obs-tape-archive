@@ -165,18 +165,19 @@ def test_daily_archive_status_transition(tmp_catalog_path):
         instance_id="i1", archive_date="2026-06-09",
         archive_filename="a1_2026-06-09.tar.gz",
     ))
-    cat.update_daily_archive_status(da_id, "writing", tape_volume="TAPE001", tape_position=0)
-    cat.update_daily_archive_status(da_id, "on_tape")
+    cat.update_daily_archive_status(da_id, "archived",
+                                     checksum_sha256="abc123")
     loaded = cat.get_daily_archive(da_id)
-    assert loaded.status == "on_tape"
-    assert loaded.tape_volume == "TAPE001"
+    assert loaded.status == "archived"
+    assert loaded.checksum_sha256 == "abc123"
+    assert loaded.archived_at is not None
 
 
 def test_list_pending_daily_archives(tmp_catalog_path):
     cat = Catalog(str(tmp_catalog_path))
     cat.init_schema()
     cat.upsert_instance("i1", "a1", "n", "", "b", True)
-    for d, st in [("2026-06-08", "pending"), ("2026-06-09", "on_tape"), ("2026-06-10", "pending")]:
+    for d, st in [("2026-06-08", "pending"), ("2026-06-09", "archived"), ("2026-06-10", "pending")]:
         da_id = cat.upsert_daily_archive(DailyArchive(
             instance_id="i1", archive_date=d, archive_filename=f"a1_{d}.tar.gz",
         ))

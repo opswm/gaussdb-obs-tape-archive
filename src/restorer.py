@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import shutil
 import tarfile
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -48,11 +49,11 @@ def plan_snapshot_restore(
     dailies = conn.execute(
         f"SELECT * FROM daily_archives WHERE id IN ({placeholders})", daily_ids,
     ).fetchall()
-    not_on_tape = [d for d in dailies if d["status"] != "on_tape"]
-    if not_on_tape:
+    not_archived = [d for d in dailies if d["status"] != "archived"]
+    if not_archived:
         raise SnapshotNotFoundError(
-            f"Snapshot/{snapshot_dir} 所在部分 daily_archive 尚未 on_tape: "
-            f"{[d['id'] for d in not_on_tape]}"
+            f"Snapshot/{snapshot_dir} 所在部分 daily_archive 尚未 archived: "
+            f"{[d['id'] for d in not_archived]}"
         )
 
     sid = str(uuid.uuid4())
@@ -76,13 +77,14 @@ def plan_snapshot_restore(
 
 class Restorer:
     def __init__(
-        self, obs_client: ObsClient | None, tape_lib: TapeLibrary | None,
-        catalog: Catalog, work_dir: Path,
+        self, obs_client: ObsClient | None,
+        catalog: Catalog, work_dir: Path, archive_dir: Path,
     ) -> None:
         self.obs = obs_client
-        self.tape = tape_lib
         self.catalog = catalog
         self.work_dir = Path(work_dir)
+        self.archive_dir = Path(archive_dir)
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
     # ─── PITR plan ───
@@ -160,8 +162,8 @@ class Restorer:
     # ─── PITR execute ───
     def execute(self, session_id: str,
                 tar_path_override: Path | None = None) -> None:
-        if self.obs is None or self.tape is None:
-            raise RestoreError("execute 需要 obs_client 和 tape_lib")
+        if self.obs is None:
+            raise RestoreError("execute 需要 obs_client (从 archive_dir 读 tar.gz 不需 tape)")
         sess = self.catalog.get_restore_session(session_id)
         if sess is None:
             raise RestoreError(f"session {session_id} 不存在")
@@ -174,10 +176,11 @@ class Restorer:
             if tar_path_override and da.archive_date == "2026-06-08":
                 tar_path.write_bytes(Path(tar_path_override).read_bytes())
             else:
-                self.tape.read_archive(
-                    da.tape_volume, da.tape_position or 0,
-                    da.compressed_size_bytes or 0, str(tar_path),
-                )
+                src = self.archive_dir / da.archive_filename
+                if not src.exists():
+                    raise RestoreError(
+                        f"archive_dir 缺少 tar.gz: {src}")
+                shutil.copy2(src, tar_path)
 
             actual = hashlib.sha256(tar_path.read_bytes()).hexdigest()
             if actual != da.checksum_sha256:

@@ -65,8 +65,6 @@ class BackupObject:
     backup_timestamp_ms: int | None = None
     status: BackupObjectStatus = "discovered"
     id: int | None = None
-    tape_volume: str | None = None
-    tape_position: int | None = None
     daily_archive_id: int | None = None
     checksum_sha256: str | None = None
     verified_at: datetime | None = None
@@ -82,6 +80,7 @@ class DailyArchive:
     instance_id: str
     archive_date: str
     archive_filename: str
+    archive_week_end: str | None = None
     backup_count: int = 0
     total_size_bytes: int = 0
     compressed_size_bytes: int = 0
@@ -89,6 +88,7 @@ class DailyArchive:
     diff_count: int = 0
     snapshot_count: int = 0
     xlog_count: int = 0
+    metadata_skipped_count: int = 0
     full_dirs: str = "[]"
     diff_dirs: str = "[]"
     snapshot_dirs: str = "[]"
@@ -96,12 +96,10 @@ class DailyArchive:
     xlog_lsn_end: str | None = None
     xlog_time_start: str | None = None
     xlog_time_end: str | None = None
-    tape_volume: str | None = None
-    tape_position: int | None = None
     checksum_sha256: str | None = None
     status: DailyArchiveStatus = "pending"
     created_at: datetime | None = None
-    tape_written_at: datetime | None = None
+    archived_at: datetime | None = None
     manifest_json: str | None = None
     id: int | None = None
 

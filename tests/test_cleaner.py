@@ -20,7 +20,7 @@ def _seed(tmp_path):
     # 真实 daily_archive (FK 需要)
     da_id = cat.upsert_daily_archive(DailyArchive(
         instance_id="tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", archive_date="2026-06-09",
-        archive_filename="ncbs_busi_2026-06-09.tar.gz", status="on_tape",
+        archive_filename="ncbs_busi_2026-06-09.tar.gz", status="archived",
         checksum_sha256="sha",
     ))
 
