@@ -1,4 +1,4 @@
-"""Packer: 按天打包 tar.gz + manifest.json + SHA256。"""
+"""Packer: 周度打包 tar.gz + metadata.json + SHA256。"""
 from __future__ import annotations
 
 import io
@@ -10,9 +10,11 @@ from pathlib import Path
 
 from src.catalog import Catalog
 from src.errors import ArchiveError
-from src.manifest import build_manifest, write_manifest
+from src.manifest import build_weekly_manifest, write_metadata, render_preview
 from src.models import BackupObject, DailyArchive, Policy
 from src.obs_client import ObsClient
+from src.week_boundary import week_range_to_filenames
+from src.utils import ensure_utc_aware, utc_to_beijing, format_beijing_short
 
 
 class Packer:
