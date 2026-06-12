@@ -17,7 +17,6 @@ from src.errors import (
     SnapshotNotFoundError,
 )
 from src.obs_client import ObsClient
-from src.tape_lib import TapeLibrary
 
 
 # ─── P0-4: Snapshot 独立恢复入口 ───

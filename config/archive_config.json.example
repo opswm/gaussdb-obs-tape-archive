@@ -1,5 +1,5 @@
 {
-  "_comment": "完整配置示例，复制到 archive_config.json 后填入真实 instance_id / 凭证。env:XXX 引用同名环境变量。",
+  "_comment": "完整配置示例, 复制到 archive_config.json 后填入真实 instance_id / 凭证. env:XXX 引用同名环境变量. archive_dir 即磁带库映射目录, 程序把周度 tar.gz 写入该目录, Restorer 也从该目录读.",
   "obs": {
     "bucket_name": "dbsbucket-0-tj01-XXXX",
     "endpoint": "https://obs.tj01.xxxxx.myhuaweicloud.com",
@@ -19,7 +19,8 @@
         "archive_full": true, "archive_snapshot": true,
         "archive_diff": true, "archive_xlog": true,
         "retention_days": 90,
-        "xlog_redundancy_hours": 6.0, "xlog_forward_hours": 6.0
+        "xlog_redundancy_hours": 6.0, "xlog_forward_hours": 6.0,
+        "week_start_day": 6
       }
     },
     {
@@ -32,7 +33,8 @@
         "archive_full": true, "archive_snapshot": true,
         "archive_diff": true, "archive_xlog": true,
         "retention_days": 90,
-        "xlog_redundancy_hours": 6.0, "xlog_forward_hours": 6.0
+        "xlog_redundancy_hours": 6.0, "xlog_forward_hours": 6.0,
+        "week_start_day": 2
       }
     },
     {
@@ -45,16 +47,12 @@
         "archive_full": true, "archive_snapshot": true,
         "archive_diff": true, "archive_xlog": false,
         "retention_days": 90,
-        "xlog_redundancy_hours": 6.0, "xlog_forward_hours": 6.0
+        "xlog_redundancy_hours": 6.0, "xlog_forward_hours": 6.0,
+        "week_start_day": 4
       }
     }
   ],
-  "tape": {
-    "mode": "simulated",
-    "simulated_path": "/data/tapes",
-    "max_volume_size_gb": 12000,
-    "verify_after_write": true
-  },
+  "archive_dir": "/data/tape-mapping",
   "catalog": {
     "path": "/data/catalog/gaussdb_archive.db",
     "backup_enabled": true,

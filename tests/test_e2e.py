@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 
-from src.archiver import Archiver
 from src.catalog import Catalog
 from src.cleaner import Cleaner
 from src.config import load_config
@@ -26,7 +25,6 @@ from src.policy import validate_policies
 from src.reaper import Reaper
 from src.restorer import Restorer, plan_snapshot_restore
 from src.scanner import Scanner
-from src.tape_lib import TapeLibrary
 
 
 def _write_cfg(tmp_path: Path, instances: list[dict]) -> Path:

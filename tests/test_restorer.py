@@ -10,7 +10,6 @@ from src.catalog import Catalog
 from src.errors import RestoreError, SnapshotNotFoundError, PitrNotCapableError
 from src.obs_client import ObsClient
 from src.restorer import Restorer, plan_snapshot_restore
-from src.tape_lib import TapeLibrary
 
 
 # ─────────────────── Fixtures ───────────────────
@@ -120,13 +119,14 @@ def test_plan_rejects_instance_without_xlog_policy(tmp_path):
 
 # ─────────────────── Tests: execute ───────────────────
 def test_execute_creates_restore_session_and_objects(tmp_path):
-    """execute 端到端: 用单 daily_archive + tar_path_override 简化磁带回读。"""
+    """execute 端到端: archive_dir 直接放 tar.gz, tar_path_override 仍兼容。"""
     cat, da_full, _ = _seed_full_pipeline(tmp_path)
     obs = ObsClient.create_mock()
-    tape_lib = TapeLibrary.create_simulated(str(tmp_path / "tapes"), 10)
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
 
     import io, tarfile, hashlib, json as _json
-    tar = tmp_path / "ncbs_busi_2026-06-08.tar.gz"
+    tar = archive_dir / "ncbs_busi_2026-06-08.tar.gz"
     with tarfile.open(tar, "w:gz") as tf:
         data = b"PAYLOAD_FULL"
         info = tarfile.TarInfo(name="tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2/Db/1780160839955/f.rch")
