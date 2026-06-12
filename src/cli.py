@@ -13,17 +13,26 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("scan", help="扫描 OBS")
     s.add_argument("--cluster", help="指定集群 alias, 不传则扫描所有")
 
-    s = sub.add_parser("pack", help="按天打包")
+    # 旧 'pack' 子命令作为 'pack-weekly' 的别名 (向后兼容)
+    s = sub.add_parser("pack", help="周度打包 (别名, 同 pack-weekly)")
     s.add_argument("--cluster", required=True)
-    s.add_argument("--date", required=True, help="YYYY-MM-DD")
+    s.add_argument("--date", help="已废弃: 用 --week-start 替代")
+    s.add_argument("--week-start", help="周起始日 YYYY-MM-DD (不传则取当前周)")
+    s.add_argument("--preview", "--dry-run", action="store_true",
+                   dest="preview", help="预览模式: 不下载不写盘, 只输出计划清单")
 
-    s = sub.add_parser("archive", help="写入磁带")
-    s.add_argument("--full", action="store_true", help="完整流水线: scan→pack→archive")
-    s.add_argument("--cluster", help="指定集群")
+    s = sub.add_parser("pack-weekly", help="周度打包 + 预览")
+    s.add_argument("--cluster", required=True)
+    s.add_argument("--week-start", help="周起始日 YYYY-MM-DD (不传则取当前周)")
+    s.add_argument("--preview", "--dry-run", action="store_true",
+                   dest="preview", help="预览模式: 不下载不写盘, 只输出计划清单")
+
+    # 删 'archive' 子命令 (磁带库抽象移除)
 
     s = sub.add_parser("reap", help="安全删除 OBS 原始备份")
     s.add_argument("--cluster", required=True)
-    s.add_argument("--date", required=True, help="YYYY-MM-DD")
+    s.add_argument("--week-start", required=True,
+                   help="周起始日 YYYY-MM-DD (reap 整周)")
     s.add_argument("--dry-run", action="store_true")
 
     s = sub.add_parser("restore-plan", help="生成 PITR 计划")
@@ -40,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("status", help="查看状态")
     s.add_argument("--cluster", required=True)
-    s.add_argument("--date", help="YYYY-MM-DD, 不传则汇总")
+    s.add_argument("--week-start", help="周起始日 YYYY-MM-DD, 不传则汇总")
 
     s = sub.add_parser("cluster", help="集群管理")
     ssub = s.add_subparsers(dest="cluster_command", required=True)

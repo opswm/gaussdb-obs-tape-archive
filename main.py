@@ -4,15 +4,16 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import sys
+from datetime import date
 from pathlib import Path
 
 from src.catalog import Catalog
 from src.cli import build_parser
 from src.config import load_config
-from src.errors import ArchiveError
+from src.errors import ArchiveError, ArchiveDirNotFoundError
 from src.obs_client import ObsClient
 from src.policy import validate_policies
-from src.tape_lib import TapeLibrary
+from src.week_boundary import compute_week_range
 
 
 def _build_obs(cfg) -> ObsClient:
@@ -20,10 +21,23 @@ def _build_obs(cfg) -> ObsClient:
     return ObsClient.create_mock()
 
 
-def _build_tape(cfg) -> TapeLibrary:
-    return TapeLibrary.create_simulated(
-        cfg.tape.simulated_path, cfg.tape.max_volume_size_gb,
-    )
+def _archive_dir_or_die(cfg) -> Path:
+    """解析 archive_dir 并确保存在 (用于写周度 tar.gz)。"""
+    p = Path(cfg.archive_dir.path)
+    if not p.exists():
+        raise ArchiveDirNotFoundError(
+            f"archive_dir 不存在: {p} (请先 mkdir 或修改配置)"
+        )
+    return p
+
+
+def _parse_week_start_or_today(arg: str | None, week_start_day: int) -> tuple[date, date]:
+    """解析 --week-start 参数; None → 当前周。"""
+    if arg:
+        return date.fromisoformat(arg), None  # 仅起; 止由 main 计算
+    ws = dt.date.today()
+    s, e = compute_week_range(ws, week_start_day)
+    return s, e
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,26 +66,26 @@ def main(argv: list[str] | None = None) -> int:
             log.info(f"scanned {ins.alias}: {n} objects")
         return 0
 
-    if args.command == "pack":
+    if args.command in ("pack", "pack-weekly"):
         from src.packer import Packer
         obs = _build_obs(cfg)
-        p = Packer(obs, cat, Path(cfg.work_dir))
         ins = next(i for i in cfg.instances if i.alias == args.cluster)
-        da = p.pack_daily(ins.instance_id, args.date)
-        log.info(f"packed: {da.archive_filename}")
-        return 0
-
-    if args.command == "archive":
-        from src.archiver import Archiver
-        tape = _build_tape(cfg)
-        a = Archiver(tape, cat)
-        for da in cat.list_daily_archives_by_status("pending"):
-            tar = Path(cfg.work_dir) / da.archive_filename
-            if not tar.exists():
-                log.warning(f"missing tar: {tar}")
-                continue
-            a.archive_to_tape(da.id, str(tar))
-            log.info(f"archived: {da.archive_filename}")
+        archive_dir = _archive_dir_or_die(cfg)
+        p = Packer(obs, cat, Path(cfg.work_dir), archive_dir)
+        week_start, week_end = compute_week_range(
+            date.fromisoformat(args.week_start)
+            if args.week_start else dt.date.today(),
+            ins.policy.week_start_day,
+        )
+        result = p.pack_weekly(ins.instance_id, week_start, week_end,
+                                preview=args.preview)
+        if args.preview:
+            print(result.preview_text or "(空)")
+        else:
+            log.info(
+                f"packed weekly: {result.archive_filename} "
+                f"sha256={result.checksum_sha256[:12] if result.checksum_sha256 else 'N/A'}..."
+            )
         return 0
 
     if args.command == "reap":
@@ -79,19 +93,23 @@ def main(argv: list[str] | None = None) -> int:
         obs = _build_obs(cfg)
         r = Reaper(obs, cat)
         ins = next(i for i in cfg.instances if i.alias == args.cluster)
-        for da in cat._conn().execute(
-            "SELECT id FROM daily_archives WHERE instance_id=? AND archive_date=?",
-            (ins.instance_id, args.date),
-        ).fetchall():
-            summary = r.reap_daily_archive(da["id"])
-            log.info(f"reaped daily_archive {da['id']}: {summary}")
+        week_start, week_end = compute_week_range(
+            date.fromisoformat(args.week_start), ins.policy.week_start_day,
+        )
+        from src.week_boundary import week_range_to_iso_strings
+        ws_iso, we_iso = week_range_to_iso_strings(week_start, week_end)
+        for da in cat.list_weekly_archives_in_range(ins.instance_id,
+                                                     week_start.isoformat(),
+                                                     week_end.isoformat()):
+            summary = r.reap_daily_archive(da.id)
+            log.info(f"reaped weekly {da.archive_date} (id={da.id}): {summary}")
         return 0
 
     if args.command == "restore-plan":
         from src.restorer import Restorer
         obs = _build_obs(cfg)
-        tape = _build_tape(cfg)
-        r = Restorer(obs, tape, cat, Path(cfg.work_dir))
+        archive_dir = _archive_dir_or_die(cfg)
+        r = Restorer(obs, cat, Path(cfg.work_dir), archive_dir)
         ins = next(i for i in cfg.instances if i.alias == args.cluster)
         plan = r.plan(dt.datetime.fromisoformat(args.target), ins.instance_id)
         print(plan)
@@ -100,8 +118,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "restore":
         from src.restorer import Restorer
         obs = _build_obs(cfg)
-        tape = _build_tape(cfg)
-        r = Restorer(obs, tape, cat, Path(cfg.work_dir))
+        archive_dir = _archive_dir_or_die(cfg)
+        r = Restorer(obs, cat, Path(cfg.work_dir), archive_dir)
         r.execute(args.session_id)
         log.info(f"restored session {args.session_id}")
         return 0
@@ -115,12 +133,30 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "status":
+        from src.week_boundary import compute_week_range
         for ins in cfg.instances:
             if ins.alias != args.cluster:
                 continue
-            n_pending = sum(1 for _ in cat.list_daily_archives_by_status("pending"))
-            n_on_tape = sum(1 for _ in cat.list_daily_archives_by_status("on_tape"))
-            print(f"{ins.alias}: pending={n_pending} on_tape={n_on_tape}")
+            if args.week_start:
+                week_start, week_end = compute_week_range(
+                    date.fromisoformat(args.week_start),
+                    ins.policy.week_start_day,
+                )
+                archives = list(cat.list_weekly_archives_in_range(
+                    ins.instance_id, week_start.isoformat(), week_end.isoformat()))
+                for da in archives:
+                    print(
+                        f"  weekly {da.archive_date} → {da.archive_week_end}: "
+                        f"{da.archive_filename} status={da.status}"
+                    )
+            else:
+                n_archived = sum(
+                    1 for _ in cat.list_daily_archives_by_status("archived")
+                )
+                n_pending = sum(
+                    1 for _ in cat.list_daily_archives_by_status("pending")
+                )
+                print(f"{ins.alias}: pending={n_pending} archived={n_archived}")
         return 0
 
     return 1

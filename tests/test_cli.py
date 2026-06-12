@@ -26,10 +26,11 @@ def test_reap_requires_dry_run_or_confirm():
     from src.cli import build_parser
     p = build_parser()
     a1 = p.parse_args(["--config", "cfg.json", "reap",
-                       "--cluster", "ncbs_busi", "--date", "2026-06-09"])
+                       "--cluster", "ncbs_busi", "--week-start", "2026-05-30"])
     assert a1.dry_run is False
     a2 = p.parse_args(["--config", "cfg.json", "reap",
-                       "--cluster", "ncbs_busi", "--date", "2026-06-09", "--dry-run"])
+                       "--cluster", "ncbs_busi", "--week-start", "2026-05-30",
+                       "--dry-run"])
     assert a2.dry_run is True
 
 
