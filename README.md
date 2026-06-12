@@ -4,7 +4,7 @@
 
 自动发现 GaussDB 在 OBS 桶中的全量/差异/快照/xlog 备份,按**周度**(per-cluster 可配置起点 1-7)打包到配置的 `archive_dir` 目录,跳过元数据,严格按 xlog 时间窗过滤,清理已归档的 OBS 原始数据,并支持时间点恢复 (PITR)。
 
-> 8 个核心模块 · 89/89 测试通过 · 7 个原子 Commit
+> 8 个核心模块 · 115/115 测试通过 · 10 个原子 Commit
 
 ---
 
@@ -352,7 +352,7 @@ pending (catalog 行刚创建) ──pack_weekly 写 archive_dir + SHA256 校验
 ## 测试与质量
 
 ```bash
-pytest              # 89 用例, ~0.5s 全量
+pytest              # 115 用例, ~0.3s 全量
 ```
 
 ### 测试矩阵
@@ -372,32 +372,8 @@ pytest              # 89 用例, ~0.5s 全量
 | reaper | test_reaper.py | 5 |
 | restorer | test_restorer.py | 8 |
 | scanner | test_scanner.py | 8 |
-| utils | (via test_packer 间接) | — |
-| week_boundary | (via test_packer 间接) | — |
-| **合计** | **14 文件** | **89** |
-
-### 已修复的 6 个 P0/P1 缺陷 (语义保留)
-
-| Commit | 修复 |
-|---|---|
-| `9fb4abf` | PITR chain 自动重建 (scanner 末尾) |
-| `4fe12f7` | PITR chain 重建整体事务化 |
-| `42fb906` | Reaper ETag mismatch 硬失败 (不再静默继续) |
-| `ec41eeb` | Cleaner 改 skip+failed, 终态 'failed' 标识运维介入 |
-| `1352e31` | Cleaner 允许 'failed' + 空 restore_objects mark cleaned |
-| `f172dab` | xlog 窗口边界 TZ 归一 (避免 naive vs aware 字符串比较错位) |
-
-### v2.0 重构新增 (本批次)
-
-| Commit | 内容 |
-|---|---|
-| `feat(week)` | `week_boundary.py` + `utils.py` (周度边界 + Beijing time) |
-| `feat(models)` | `Policy.week_start_day` + `archive_dir` 配置 + `InvalidWeekStartDayError` |
-| `refactor(catalog)` | 删 `tape_volume`/`tape_position`; `daily_archives.status` 二态; 新增 `list_weekly_archives_in_range` + `list_backup_objects_weekly` (xlog 时间窗); `archive_week_end` 列; `metadata_skipped_count` |
-| `feat(manifest)` | `build_weekly_manifest` (含 Beijing time + LSN 范围) + `render_preview` |
-| `feat(packer)` | 周度 `pack_weekly` + preview; 过滤 metadata/archive_only; 直接写 archive_dir; SHA256 校验 |
-| `refactor(cli)` | 新增 `pack-weekly`; reap 改 `--week-start`; 删 `archive` 子命令 |
-| `cleanup` | 删 `tape_lib.py` + `archiver.py` + 对应测试; archive_dir 即磁带库 |
+| utils | test_utils.py | 26 |
+| **合计** | **14 文件** | **115** |
 
 ---
 

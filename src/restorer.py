@@ -163,7 +163,7 @@ class Restorer:
     def execute(self, session_id: str,
                 tar_path_override: Path | None = None) -> None:
         if self.obs is None:
-            raise RestoreError("execute 需要 obs_client (从 archive_dir 读 tar.gz 不需 tape)")
+            raise RestoreError("execute 需要 obs_client (上传恢复对象到 OBS)")
         sess = self.catalog.get_restore_session(session_id)
         if sess is None:
             raise RestoreError(f"session {session_id} 不存在")

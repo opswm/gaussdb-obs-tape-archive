@@ -1,5 +1,5 @@
 """Reaper 单元测试。
-- 6 道门禁: daily_archive 状态 / 对象 archived / 校验和存在 / 顺序依赖 / ETag / metadata 跳过
+- 5 道门禁: daily_archive 状态 / 对象 archived / 依赖门 / 顺序依赖 / ETag
 - 5 个测试覆盖 happy path + 4 个门禁拒绝
 """
 import datetime as dt

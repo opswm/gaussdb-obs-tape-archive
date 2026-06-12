@@ -31,7 +31,7 @@ class ObsError(ArchiveError):
 
 
 class UnsafeDeleteError(ArchiveError):
-    """Reaper 6 道门禁任一未通过。"""
+    """Reaper 5 道门禁任一未通过。"""
 
 
 class RestoreError(ArchiveError):

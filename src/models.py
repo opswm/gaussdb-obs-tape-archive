@@ -8,7 +8,7 @@ from typing import Literal
 
 # ─── 备份对象状态机 ───
 BackupObjectStatus = Literal[
-    "discovered", "queued_for_archive", "archiving",
+    "discovered", "queued_for_archive",
     "archived", "obs_deleted",
 ]
 BackupType = Literal["full", "diff", "snapshot", "xlog", "metadata"]

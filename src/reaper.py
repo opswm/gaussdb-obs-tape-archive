@@ -1,4 +1,4 @@
-"""Reaper: 安全删除 OBS 原始备份。6 道门禁 + ETag 二次校验 + 顺序依赖。"""
+"""Reaper: 安全删除 OBS 原始备份。5 道门禁 + ETag 二次校验 + 顺序依赖。"""
 from __future__ import annotations
 
 import uuid
