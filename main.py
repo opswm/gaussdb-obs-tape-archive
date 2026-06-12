@@ -31,15 +31,6 @@ def _archive_dir_or_die(cfg) -> Path:
     return p
 
 
-def _parse_week_start_or_today(arg: str | None, week_start_day: int) -> tuple[date, date]:
-    """解析 --week-start 参数; None → 当前周。"""
-    if arg:
-        return date.fromisoformat(arg), None  # 仅起; 止由 main 计算
-    ws = dt.date.today()
-    s, e = compute_week_range(ws, week_start_day)
-    return s, e
-
-
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO,
@@ -71,7 +62,8 @@ def main(argv: list[str] | None = None) -> int:
         obs = _build_obs(cfg)
         ins = next(i for i in cfg.instances if i.alias == args.cluster)
         archive_dir = _archive_dir_or_die(cfg)
-        p = Packer(obs, cat, Path(cfg.work_dir), archive_dir)
+        p = Packer(obs, cat, Path(cfg.work_dir), archive_dir,
+                   compression_level=cfg.archive.compression_level)
         week_start, week_end = compute_week_range(
             date.fromisoformat(args.week_start)
             if args.week_start else dt.date.today(),

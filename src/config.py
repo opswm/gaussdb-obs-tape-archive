@@ -44,17 +44,6 @@ class InstanceConfig:
 
 
 @dataclass
-class TapeConfig:
-    """兼容旧字段: 仅保留以便读取历史配置, 实际不被使用。
-    新配置请使用 archive_dir 顶层字段。
-    """
-    mode: str
-    simulated_path: str
-    max_volume_size_gb: int
-    verify_after_write: bool = True
-
-
-@dataclass
 class ArchiveDirConfig:
     """归档目录配置: 程序把 weekly tar.gz 写入此目录, 该目录即磁带库映射目录。"""
     path: str
@@ -85,7 +74,6 @@ class RestoreConfig:
 class AppConfig:
     obs: ObsConfig
     instances: list[InstanceConfig]
-    tape: TapeConfig | None  # 兼容旧字段, 实际不使用
     catalog: CatalogConfig
     archive_dir: ArchiveDirConfig
     work_dir: str
@@ -131,16 +119,6 @@ def load_config(path: str) -> AppConfig:
                 display_name=ins["display_name"], description=ins.get("description", ""),
                 enabled=bool(ins.get("enabled", True)), policy=pol,
             ))
-
-        # 兼容旧 "tape" 段 (可选, 实际不读取)
-        tape: TapeConfig | None = None
-        if "tape" in raw:
-            t = raw["tape"]
-            tape = TapeConfig(
-                mode=t["mode"], simulated_path=t["simulated_path"],
-                max_volume_size_gb=int(t["max_volume_size_gb"]),
-                verify_after_write=bool(t.get("verify_after_write", True)),
-            )
 
         # 新归档目录 (必需, 替代旧 "tape" 段)
         if "archive_dir" not in raw:
@@ -199,7 +177,7 @@ def load_config(path: str) -> AppConfig:
             )
 
     return AppConfig(
-        obs=obs, instances=instances, tape=tape,
+        obs=obs, instances=instances,
         catalog=catalog, archive_dir=archive_dir,
         work_dir=raw["work_dir"],
         archive=archive, restore=restore,

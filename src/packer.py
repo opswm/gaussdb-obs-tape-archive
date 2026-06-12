@@ -58,11 +58,13 @@ class Packer:
     def __init__(
         self, obs: ObsClient, catalog: Catalog,
         work_dir: Path, archive_dir: Path,
+        compression_level: int = 6,
     ) -> None:
         self.obs = obs
         self.catalog = catalog
         self.work_dir = Path(work_dir)
         self.archive_dir = Path(archive_dir)
+        self.compression_level = max(0, min(9, compression_level))
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -205,7 +207,8 @@ class Packer:
         # 6. tar.gz 打包 (原子写: 写 tmp 后 rename, 中途失败不毁旧 tar)
         import io as _io
         tar_buf = _io.BytesIO()
-        with tarfile.open(fileobj=tar_buf, mode="w:gz", compresslevel=6) as tf:
+        with tarfile.open(fileobj=tar_buf, mode="w:gz",
+                          compresslevel=self.compression_level) as tf:
             for p in sorted(staging.rglob("*")):
                 if p.is_file():
                     tf.add(p, arcname=str(p.relative_to(staging)))

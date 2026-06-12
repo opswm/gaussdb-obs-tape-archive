@@ -33,9 +33,6 @@ def _write_cfg(tmp_path: Path, instances: list[dict]) -> Path:
         "obs": {"bucket_name": "b", "endpoint": "http://x",
                 "access_key": "a", "secret_key": "s"},
         "instances": instances,
-        "tape": {"mode": "simulated",
-                 "simulated_path": str(tmp_path / "tapes"),
-                 "max_volume_size_gb": 10, "verify_after_write": True},
         "archive_dir": str(tmp_path / "tape_mapping"),
         "catalog": {"path": str(tmp_path / "cat.db"),
                     "backup_enabled": False, "backup_path": "",
@@ -148,7 +145,7 @@ def test_e2e_full_pipeline(tmp_path: Path):
                          instance_id="tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2")
     assert plan["required_full_dir"] == "1780160839955"
 
-    # 6. Reap (在 PITR 之前把 on_tape 对象标 obs_deleted)
+    # 6. Reap (在 PITR 之前把 archived 对象标 obs_deleted)
     Reaper(obs, cat).reap_daily_archive(da.id)
     # 顺序门禁: full/snapshot/diff/xlog 全部 → obs_deleted, metadata 跳过
     for bo in cat.get_objects_by_daily_archive(da.id):

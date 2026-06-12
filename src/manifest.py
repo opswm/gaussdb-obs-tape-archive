@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from src.utils import format_beijing, format_beijing_short, utc_to_beijing
+from src.utils import format_beijing_short, utc_to_beijing
 
 
 def build_weekly_manifest(
@@ -128,6 +128,19 @@ def build_xlog_summary(
     }
 
 
+def _dir_section(label: str, dirs: list[dict]) -> list[str]:
+    """渲染 full/diff/snapshot 目录段, 行数与 N 个目录对应。
+    返回 0..N+1 行: header + 每目录一行 ('  - dir_name → Beijing=... (UTC=...)')。"""
+    if not dirs:
+        return []
+    lines = [f"\n{label} ({len(dirs)} 个):"]
+    for d in dirs:
+        lines.append(
+            f"  - {d['dir_name']} → Beijing={d['beijing']} (UTC={d['utc']})"
+        )
+    return lines
+
+
 def render_preview(manifest: dict[str, Any]) -> str:
     """把 manifest 渲染为人类可读的 preview 输出。"""
     lines: list[str] = []
@@ -141,18 +154,9 @@ def render_preview(manifest: dict[str, Any]) -> str:
     lines.append(f"周起点: {period['week_start_day']} (1=周一..7=周日)")
     lines.append("")
     contents = manifest["contents"]
-    if contents["full_dirs"]:
-        lines.append(f"全量目录 ({len(contents['full_dirs'])} 个):")
-        for d in contents["full_dirs"]:
-            lines.append(f"  - {d['dir_name']} → Beijing={d['beijing']} (UTC={d['utc']})")
-    if contents["diff_dirs"]:
-        lines.append(f"\n差异目录 ({len(contents['diff_dirs'])} 个):")
-        for d in contents["diff_dirs"]:
-            lines.append(f"  - {d['dir_name']} → Beijing={d['beijing']} (UTC={d['utc']})")
-    if contents["snapshot_dirs"]:
-        lines.append(f"\n快照目录 ({len(contents['snapshot_dirs'])} 个):")
-        for d in contents["snapshot_dirs"]:
-            lines.append(f"  - {d['dir_name']} → Beijing={d['beijing']} (UTC={d['utc']})")
+    lines.extend(_dir_section("全量目录", contents["full_dirs"]))
+    lines.extend(_dir_section("差异目录", contents["diff_dirs"]))
+    lines.extend(_dir_section("快照目录", contents["snapshot_dirs"]))
     xs = contents["xlog_summary"]
     if xs["count"]:
         lines.append(

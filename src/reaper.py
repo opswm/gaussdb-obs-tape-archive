@@ -48,11 +48,10 @@ class Reaper:
             raise UnsafeDeleteError(
                 f"存在 {len(no_obj_sha)} 个对象无独立 SHA256")
 
-        # ─── 门禁 3.5: 类型覆盖校验 (P1-1 full 依赖) ───
+        # ─── 门禁 3.5: 类型覆盖校验 (defense-in-depth) ───
         # 当 allow_uncovered_types=False 时, 缺 full 视为错误;
-        # 缺 diff/xlog 视为部分 PITR, 但 plan 文档要求:
-        # 进入 diff 阶段前 full 必须存在, 进入 xlog 阶段前 diff 必须存在。
-        # 简化: 把缺失的 full 显式检查。
+        # 门禁 4 只在 full/snapshot 类型已存在但未删完时拒绝, 不会检查
+        # "应该存在但完全缺失" 的情况, 故保留 3.5 兜底。
         if not allow_uncovered_types:
             has_full = any(o.backup_type == "full" for o in objs)
             if not has_full:

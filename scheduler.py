@@ -54,7 +54,8 @@ def weekly_archive_job(config_path: str) -> None:
                 cat.update_backup_object_status(bo.id, "queued_for_archive")
 
         # Phase 3: pack_weekly (per-cluster 当前周)
-        p = Packer(obs, cat, work_dir, archive_dir)
+        p = Packer(obs, cat, work_dir, archive_dir,
+                   compression_level=cfg.archive.compression_level)
         packed_count = 0
         for ins in cfg.instances:
             if not ins.enabled:

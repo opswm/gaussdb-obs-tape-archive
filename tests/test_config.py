@@ -24,8 +24,6 @@ def test_load_minimal_config(tmp_path):
                 "xlog_redundancy_hours": 6.0, "xlog_forward_hours": 6.0,
             }
         }],
-        "tape": {"mode": "simulated", "simulated_path": str(tmp_path / "tapes"),
-                 "max_volume_size_gb": 100, "verify_after_write": True},
         "archive_dir": str(tmp_path / "tape_mapping"),
         "catalog": {"path": str(tmp_path / "cat.db"), "backup_enabled": False,
                     "backup_path": "", "backup_retention_days": 90},
@@ -38,7 +36,6 @@ def test_load_minimal_config(tmp_path):
     cfg = load_config(str(cfg_path))
     assert cfg.instances[0].alias == "ncbs_busi"
     assert cfg.instances[0].policy.archive_xlog is True
-    assert cfg.tape.mode == "simulated"
     assert cfg.archive_dir.path == str(tmp_path / "tape_mapping")
 
 

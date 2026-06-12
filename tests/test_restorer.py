@@ -191,7 +191,7 @@ def test_plan_snapshot_restore_not_found(tmp_path):
         plan_snapshot_restore(cat, "tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", "9999999999999")
 
 
-def test_plan_snapshot_restore_not_on_tape_rejected(tmp_path):
+def test_plan_snapshot_restore_not_archived_rejected(tmp_path):
     cat, da_full, _ = _seed_full_pipeline(tmp_path)
     bo = cat.upsert_backup_object(_bo("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2",
         "tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2/Snapshot/1781000000000/s.rch", "snapshot",
