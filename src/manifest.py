@@ -105,9 +105,16 @@ def build_xlog_summary(
     lms = [bo.obs_last_modified for bo in xlog_obs]
     lm_first = min(lms)
     lm_last = max(lms)
-    lsns = [bo.parent_backup_dir for bo in xlog_obs if bo.parent_backup_dir]
-    lsn_min = min(lsns) if lsns else None
-    lsn_max = max(lsns) if lsns else None
+    # LSN 是 24 字符段名, 格式 (high32, low32) 大写 16 进制.
+    # 字符串 min/max 与 WAL 数值序不一致 (例如 '0000000200000000000000A0'
+    # 数值 > '000000010000000000000100' 但字典序相反). 必须数值比较.
+    def _lsn_key(parent_dir: str) -> tuple[int, int]:
+        return (int(parent_dir[:16], 16), int(parent_dir[16:24], 16))
+
+    lsns = [bo.parent_backup_dir for bo in xlog_obs
+            if bo.parent_backup_dir and len(bo.parent_backup_dir) == 24]
+    lsn_min = min(lsns, key=_lsn_key) if lsns else None
+    lsn_max = max(lsns, key=_lsn_key) if lsns else None
     return {
         "count": len(xlog_obs),
         "last_modified_first_utc": lm_first.isoformat(),

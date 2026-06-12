@@ -14,8 +14,8 @@ BackupObjectStatus = Literal[
 BackupType = Literal["full", "diff", "snapshot", "xlog", "metadata"]
 RestorePolicy = Literal["normal", "archive_only"]
 
-# ─── 每日归档状态 ───
-DailyArchiveStatus = Literal["pending", "writing", "on_tape", "deleted"]
+# ─── 周度归档状态 (二态, 与 SQL CHECK 对齐) ───
+DailyArchiveStatus = Literal["pending", "archived"]
 
 # ─── 恢复会话状态 ───
 RestoreSessionStatus = Literal[

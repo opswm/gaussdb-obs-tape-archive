@@ -272,6 +272,12 @@ class Catalog:
             "SELECT * FROM instance_mappings WHERE alias = ?", (alias,)
         ).fetchone()
 
+    def get_instance_by_id(self, instance_id: str) -> sqlite3.Row | None:
+        """按 instance_id 查 instance (单条 SQL 查, 替代 3 处线性扫描 _bucket)。"""
+        return self._conn().execute(
+            "SELECT * FROM instance_mappings WHERE instance_id = ?", (instance_id,)
+        ).fetchone()
+
     def list_enabled_instances(self) -> Iterable[sqlite3.Row]:
         return self._conn().execute(
             "SELECT * FROM instance_mappings WHERE enabled = 1 ORDER BY alias"
@@ -409,19 +415,6 @@ class Catalog:
                   week_start_iso, week_end_iso]
         for r in self._conn().execute(sql, params):
             yield self._row_to_bo(r)
-
-    def set_backup_object_tape(
-        self, bo_id: int, tape_volume: str, tape_position: int,
-        checksum: str,
-    ) -> None:
-        with self.transaction() as c:
-            c.execute(
-                """UPDATE backup_objects
-                   SET tape_volume = ?, tape_position = ?, checksum_sha256 = ?,
-                       verified_at = datetime('now'), updated_at = datetime('now')
-                   WHERE id = ?""",
-                (tape_volume, tape_position, checksum, bo_id),
-            )
 
     def mark_backup_object_obs_deleted(self, bo_id: int, run_id: str) -> None:
         with self.transaction() as c:

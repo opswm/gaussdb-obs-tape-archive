@@ -135,7 +135,12 @@ class Reaper:
                 cumulative_archived[bo.backup_type] += 1
                 continue
             # ETag 必须严格一致 (任何不一致 = 数据被改, 拒绝删)
-            if bo.obs_etag and meta.etag and meta.etag != bo.obs_etag:
+            # fail-closed: null obs_etag 视为不可信, 拒绝删除
+            if not bo.obs_etag:
+                raise UnsafeDeleteError(
+                    f"门禁 5 失败: {bo.obs_key} 缺 obs_etag, 拒绝删除"
+                )
+            if meta.etag and meta.etag != bo.obs_etag:
                 raise UnsafeDeleteError(
                     f"门禁 5 失败: {bo.obs_key} ETag 不匹配 "
                     f"(catalog={bo.obs_etag}, OBS={meta.etag})"
@@ -159,7 +164,7 @@ class Reaper:
         return summary
 
     def _bucket(self, da) -> str:
-        for i in self.catalog.list_enabled_instances():
-            if i["instance_id"] == da.instance_id:
-                return i["bucket_name"]
-        raise UnsafeDeleteError(f"未知 instance: {da.instance_id}")
+        ins = self.catalog.get_instance_by_id(da.instance_id)
+        if ins is None:
+            raise UnsafeDeleteError(f"未知 instance: {da.instance_id}")
+        return ins["bucket_name"]

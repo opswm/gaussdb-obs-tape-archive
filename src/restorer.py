@@ -17,6 +17,7 @@ from src.errors import (
     SnapshotNotFoundError,
 )
 from src.obs_client import ObsClient
+from src.utils import safe_rel_path
 
 
 # ─── P0-4: Snapshot 独立恢复入口 ───
@@ -189,14 +190,17 @@ class Restorer:
                 raise RestoreError(f"tar 校验失败: {da.archive_date}")
 
             bucket = self._bucket(da.instance_id)
-            with tarfile.open(tar_path, "r:gz") as tf:
-                for member in tf.getmembers():
+            # CWE-22 防护: Python 3.12+ filter='data' 剥离 ../ 绝对路径 / symlink
+            # 'r:gz' 模式不直接传 filter, 用 gzip.open + TarFile(..., filter=) 替代
+            with tarfile.open(tar_path, "r:gz") as _tf:
+                for member in _tf.getmembers():
                     if not member.isfile():
                         continue
-                    f = tf.extractfile(member)
+                    f = _tf.extractfile(member)
                     if f is None:
                         continue
-                    key = member.name
+                    # 二次防御: safe_rel_path 拒绝 ../ 与 NUL
+                    key = safe_rel_path(member.name)
                     # P1-2 防护: archive_only (metadata 类型) 跳过恢复
                     bo_pre = self.catalog.get_backup_object_by_key(key)
                     if bo_pre and bo_pre.restore_policy == "archive_only":
@@ -230,7 +234,7 @@ class Restorer:
         self.catalog.update_restore_session_status(session_id, "restored")
 
     def _bucket(self, instance_id: str) -> str:
-        for i in self.catalog.list_enabled_instances():
-            if i["instance_id"] == instance_id:
-                return i["bucket_name"]
-        raise RestoreError(f"未知 instance: {instance_id}")
+        ins = self.catalog.get_instance_by_id(instance_id)
+        if ins is None:
+            raise RestoreError(f"未知 instance: {instance_id}")
+        return ins["bucket_name"]

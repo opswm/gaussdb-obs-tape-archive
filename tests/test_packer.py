@@ -144,7 +144,7 @@ def test_pack_weekly_xlog_time_window(tmp_path):
     week_start, week_end = compute_week_range(date(2026, 6, 3), 6)
     result = p.pack_weekly("i1", week_start, week_end)
     # 窗口内仅 1 个 xlog
-    assert result.xlog_summary_meta_for_test() if False else True
+    assert len(result.xlog_obs) == 1
     # 校验 tar 不含窗口外 xlog
     tar_path = tmp_path / "archive_dir" / result.archive_filename
     with tarfile.open(tar_path, "r:gz") as tf:

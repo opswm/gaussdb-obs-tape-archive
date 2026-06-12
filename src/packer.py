@@ -27,7 +27,10 @@ from src.manifest import (
 )
 from src.models import BackupObject, DailyArchive
 from src.obs_client import ObsClient
-from src.utils import ensure_utc_aware, utc_to_beijing, format_beijing_short
+from src.utils import (
+    atomic_write, ensure_utc_aware, format_beijing_short,
+    safe_rel_path, utc_to_beijing,
+)
 from src.week_boundary import (
     week_range_to_filenames, week_range_to_iso_strings,
 )
@@ -52,10 +55,6 @@ class WeeklyArchiveResult:
 
 
 class Packer:
-    @property
-    def xlog_summary_meta_for_test(self):
-        return self.xlog_obs  # 测试辅助: 返回 xlog_obs 列表
-
     def __init__(
         self, obs: ObsClient, catalog: Catalog,
         work_dir: Path, archive_dir: Path,
@@ -203,12 +202,16 @@ class Packer:
         staging_metadata = staging / "metadata.json"
         write_metadata(manifest, staging_metadata)
 
-        # 6. tar.gz 打包
-        tar_path = self.archive_dir / tar_name
-        with tarfile.open(tar_path, "w:gz", compresslevel=6) as tf:
+        # 6. tar.gz 打包 (原子写: 写 tmp 后 rename, 中途失败不毁旧 tar)
+        import io as _io
+        tar_buf = _io.BytesIO()
+        with tarfile.open(fileobj=tar_buf, mode="w:gz", compresslevel=6) as tf:
             for p in sorted(staging.rglob("*")):
                 if p.is_file():
                     tf.add(p, arcname=str(p.relative_to(staging)))
+        tar_bytes = tar_buf.getvalue()
+        tar_path = self.archive_dir / tar_name
+        atomic_write(tar_path, tar_bytes)
 
         # 7. 算 SHA256 + 更新 manifest
         archive_sha = hashlib.sha256(tar_path.read_bytes()).hexdigest()
@@ -266,17 +269,27 @@ class Packer:
 
     # ─── helpers ───
     def _download_object(self, bo: BackupObject, staging: Path) -> None:
-        target = staging / bo.obs_key
+        # CWE-22: 拒绝 ../ 绝对路径 / NUL, 限定 target 在 staging 内
+        rel = safe_rel_path(bo.obs_key)
+        target = staging / rel
         target.parent.mkdir(parents=True, exist_ok=True)
+        # 二次防御: resolve 后仍须在 staging 内
+        target_resolved = target.resolve()
+        staging_resolved = staging.resolve()
+        if not str(target_resolved).startswith(str(staging_resolved) + "/") \
+                and target_resolved != staging_resolved:
+            raise ArchiveError(
+                f"obs_key 解析后跳出 staging 目录: {bo.obs_key!r} → {target_resolved}"
+            )
         bucket = self._bucket_of(bo)
         with target.open("wb") as out:
             self.obs.get_object(bucket, bo.obs_key, out)
 
     def _bucket_of(self, bo: BackupObject) -> str:
-        ins = self.catalog.get_instance_by_alias(
-            next(i["alias"] for i in self.catalog.list_enabled_instances()
-                 if i["instance_id"] == bo.instance_id)
-        )
+        ins = self.catalog.get_instance_by_id(bo.instance_id)
+        if ins is None:
+            from src.errors import CatalogError
+            raise CatalogError(f"未知 instance: {bo.instance_id}")
         return ins["bucket_name"]
 
     def _sha256_file(self, p: Path) -> str:
@@ -320,15 +333,7 @@ class Packer:
             archive_filename=da.archive_filename,
             archive_path=self.archive_dir / da.archive_filename,
             checksum_sha256=da.checksum_sha256,
-            preview_text=(
-                f"已存在 weekly archive (id={da.id}, "
-                f"date={da.archive_date}, status={da.status})"
-            ),
+            preview_text=f"已存在 weekly archive (id={da.id}, "
+            f"date={da.archive_date}, status={da.status})",
         )
 
-
-# 保留旧 pack_daily 作为兼容入口 (tests 暂用, Commit 8 删除)
-def pack_daily_compat_shim_deprecated(*args, **kwargs):  # pragma: no cover
-    raise ArchiveError(
-        "pack_daily 已废弃, 请使用 pack_weekly (见 src/packer.py)"
-    )
