@@ -14,7 +14,7 @@ from src.restorer import Restorer, plan_snapshot_restore
 
 # ─────────────────── Fixtures ───────────────────
 def _seed_full_pipeline(tmp_path: Path):
-    """建 scanner→packer→archiver 完整流水线的产物。"""
+    """建 scanner→pack_weekly 完整流水线的产物。"""
     cat = Catalog(str(tmp_path / "cat.db"))
     cat.init_schema()
     cat.upsert_instance("tenant_8b3f9c1a_inst_7d2e4567b9f0c1a2", "ncbs_busi", "核心", "", "b1", True)

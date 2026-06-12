@@ -122,7 +122,8 @@ def test_e2e_full_pipeline(tmp_path: Path):
     da = cat.get_daily_archive(da_id)
     assert da.archive_filename == result.archive_filename
 
-    # 3. archive (过渡版 archiver 已经是 no-op, 验证 pack_weekly 已直接写 archive_dir)
+    # 3. (no separate archive step in v2.0; pack_weekly writes directly to archive_dir)
+    #     verify daily_archive is already 'archived' with checksum
     da_after = cat.get_daily_archive(da_id)
     assert da_after.status == "archived"
     assert da_after.checksum_sha256 is not None
