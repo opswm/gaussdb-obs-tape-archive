@@ -10,6 +10,7 @@ from datetime import date
 from pathlib import Path
 
 from src.catalog import Catalog
+from src.compat import date_fromisoformat
 from src.week_boundary import compute_week_range
 
 
@@ -119,7 +120,7 @@ def estimate_pending(
     for r in rows:
         iid = r["instance_id"]
         alias, wsd = inst_map.get(iid, (iid, 6))
-        backup_date = date.fromisoformat(r["backup_date"])
+        backup_date = date_fromisoformat(r["backup_date"])
         week_start, week_end = compute_week_range(backup_date, wsd)
         key = (iid, week_start.isoformat())
         if key not in week_groups:
@@ -202,7 +203,7 @@ def find_pending_weeks(
     seen: set[tuple[date, date]] = set()
     result: list[tuple[date, date]] = []
     for r in rows:
-        backup_date = date.fromisoformat(r["backup_date"])
+        backup_date = date_fromisoformat(r["backup_date"])
         ws, we = compute_week_range(backup_date, week_start_day)
         pair = (ws, we)
         if pair not in seen:

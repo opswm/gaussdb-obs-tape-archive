@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from src.compat import datetime_fromisoformat
 from src.utils import format_beijing_short, utc_to_beijing
 
 
@@ -49,10 +50,10 @@ def build_weekly_manifest(
             "week_start_utc": f"{week_start.isoformat()}T00:00:00+00:00",
             "week_end_utc": f"{week_end.isoformat()}T00:00:00+00:00",
             "week_start_beijing": format_beijing_short(
-                datetime.fromisoformat(f"{week_start.isoformat()}T00:00:00+00:00")
+                datetime_fromisoformat(f"{week_start.isoformat()}T00:00:00+00:00")
             ) + " (UTC+8)",
             "week_end_beijing": format_beijing_short(
-                datetime.fromisoformat(f"{week_end.isoformat()}T00:00:00+00:00")
+                datetime_fromisoformat(f"{week_end.isoformat()}T00:00:00+00:00")
             ) + " (UTC+8)",
         },
         "contents": {
@@ -96,7 +97,7 @@ def build_daily_manifest(
         "archive_period": {
             "date_utc": f"{archive_date}T00:00:00+00:00",
             "date_beijing": format_beijing_short(
-                datetime.fromisoformat(f"{archive_date}T00:00:00+00:00")
+                datetime_fromisoformat(f"{archive_date}T00:00:00+00:00")
             ) + " (UTC+8)",
         },
         "contents": {

@@ -7,6 +7,8 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from src.compat import date_fromisoformat
+
 from src.catalog import Catalog
 from src.cli import build_parser
 from src.config import load_config
@@ -101,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
                    compression_level=cfg.archive.compression_level,
                    compress=cfg.archive.compress)
         week_start, week_end = compute_week_range(
-            date.fromisoformat(args.week_start)
+            date_fromisoformat(args.week_start)
             if args.week_start else dt.date.today(),
             ins.policy.week_start_day,
         )
@@ -243,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         r = Reaper(obs, cat)
         ins = next(i for i in cfg.instances if i.alias == args.cluster)
         week_start, week_end = compute_week_range(
-            date.fromisoformat(args.week_start), ins.policy.week_start_day,
+            date_fromisoformat(args.week_start), ins.policy.week_start_day,
         )
         from src.week_boundary import week_range_to_iso_strings
         ws_iso, we_iso = week_range_to_iso_strings(week_start, week_end)

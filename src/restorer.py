@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.catalog import Catalog
+from src.compat import datetime_fromisoformat
 from src.errors import (
     PitrNotCapableError,
     RestoreError,
@@ -107,7 +108,7 @@ class Restorer:
                 f"PITR 链未覆盖 {target_time}, instance={instance_id}")
 
         base_full_dir = chain["base_full_dir"]
-        base_full_time = datetime.fromisoformat(chain["base_full_time"])
+        base_full_time = datetime_fromisoformat(chain["base_full_time"])
         diff_dirs = json.loads(chain["diff_dirs"])
 
         # P1 修复: xlog 窗口边界 TZ 归一, 避免 naive 与 TZ-aware 字符串比较错位

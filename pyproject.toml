@@ -2,7 +2,7 @@
 name = "gaussdb-archive"
 version = "0.1.0"
 description = "GaussDB OBS backup archiver to archive directory"
-requires-python = ">=3.11"
+requires-python = ">=3.7"
 dependencies = [
     # 当前所有功能均使用 Python 标准库, 零外部依赖即可运行。
     # esdk-obs-python 仅在对接真实华为云 OBS 时需要 (当前默认 Mock 模式).

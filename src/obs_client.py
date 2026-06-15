@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import BinaryIO, Iterable
 
+from src.compat import datetime_fromisoformat
+
 
 @dataclass
 class ObsObject:
@@ -236,9 +238,8 @@ def _parse_sdk_time(value: str) -> datetime:
         pass
     try:
         # 尝试 ISO 8601
-        from datetime import datetime as dt
         s = value.replace("Z", "+00:00")
-        return dt.fromisoformat(s).astimezone(timezone.utc)
+        return datetime_fromisoformat(s).astimezone(timezone.utc)
     except (ValueError, TypeError):
         return datetime.now(timezone.utc)
 

@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
+from src.compat import date_fromisoformat, datetime_fromisoformat
+
 from src.catalog import Catalog
 from src.errors import ArchiveError
 from src.manifest import (
@@ -104,8 +106,8 @@ class Packer:
         # 2. 统计跳过的 metadata / archive_only (在 [week_start, week_end) 窗口内)
         ws_iso, we_iso = week_range_to_iso_strings(week_start, week_end)
         from src.utils import ensure_utc_aware as _eut
-        ws_ms = int(_eut(datetime.fromisoformat(ws_iso)).timestamp() * 1000)
-        we_ms = int(_eut(datetime.fromisoformat(we_iso)).timestamp() * 1000)
+        ws_ms = int(_eut(datetime_fromisoformat(ws_iso)).timestamp() * 1000)
+        we_ms = int(_eut(datetime_fromisoformat(we_iso)).timestamp() * 1000)
         meta_rows = list(self.catalog._conn().execute(
             """SELECT COUNT(*) AS n FROM backup_objects
                WHERE instance_id = ?
@@ -281,12 +283,12 @@ class Packer:
 
         # 0. 幂等
         if not preview:
-            existing = self._find_existing(instance_id, date.fromisoformat(archive_date))
+            existing = self._find_existing(instance_id, date_fromisoformat(archive_date))
             if existing is not None:
                 return self._result_from_existing(
                     existing, instance_id,
-                    date.fromisoformat(archive_date),
-                    date.fromisoformat(archive_date) + __import__('datetime').timedelta(days=1),
+                    date_fromisoformat(archive_date),
+                    date_fromisoformat(archive_date) + __import__('datetime').timedelta(days=1),
                     ins,
                 )
 
@@ -359,8 +361,8 @@ class Packer:
 
         result = WeeklyArchiveResult(
             instance_id=instance_id,
-            week_start=date.fromisoformat(archive_date),
-            week_end=date.fromisoformat(archive_date) + __import__('datetime').timedelta(days=1),
+            week_start=date_fromisoformat(archive_date),
+            week_end=date_fromisoformat(archive_date) + __import__('datetime').timedelta(days=1),
             full_dirs=full_dirs_meta,
             diff_dirs=diff_dirs_meta,
             snapshot_dirs=snap_dirs_meta,

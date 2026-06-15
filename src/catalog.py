@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from src.compat import datetime_fromisoformat
+
 from src.errors import CatalogError
 from src.models import BackupObject, DailyArchive, Policy
 
@@ -406,10 +408,9 @@ class Catalog:
                    )
                  ORDER BY backup_type, parent_backup_dir, obs_key"""
         # week_start_iso / week_end_iso are ISO strings; ts_ms comparison needs ms
-        from datetime import datetime as _dt
         from src.utils import ensure_utc_aware
-        ws_dt = ensure_utc_aware(_dt.fromisoformat(week_start_iso))
-        we_dt = ensure_utc_aware(_dt.fromisoformat(week_end_iso))
+        ws_dt = ensure_utc_aware(datetime_fromisoformat(week_start_iso))
+        we_dt = ensure_utc_aware(datetime_fromisoformat(week_end_iso))
         ws_ms = int(ws_dt.timestamp() * 1000)
         we_ms = int(we_dt.timestamp() * 1000)
         params = [instance_id, str(ws_ms), str(we_ms),
@@ -425,9 +426,9 @@ class Catalog:
         - xlog: 按 obs_last_modified 落在 [date 00:00, date+1 00:00) UTC
         - metadata / archive_only: 过滤掉
         """
-        from datetime import datetime as _dt, timedelta
+        from datetime import timedelta
         from src.utils import ensure_utc_aware
-        day_start = ensure_utc_aware(_dt.fromisoformat(f"{archive_date}T00:00:00+00:00"))
+        day_start = ensure_utc_aware(datetime_fromisoformat(f"{archive_date}T00:00:00+00:00"))
         day_end = day_start + timedelta(days=1)
         day_end_iso = day_end.isoformat()
         sql = """SELECT * FROM backup_objects
@@ -480,15 +481,15 @@ class Catalog:
         return BackupObject(
             id=r["id"], obs_key=r["obs_key"], instance_id=r["instance_id"],
             obs_size_bytes=r["obs_size_bytes"],
-            obs_last_modified=datetime.fromisoformat(r["obs_last_modified"]),
+            obs_last_modified=datetime_fromisoformat(r["obs_last_modified"]),
             backup_type=r["backup_type"], parent_backup_dir=r["parent_backup_dir"],
             restore_policy=r["restore_policy"], backup_date=r["backup_date"],
             backup_timestamp_ms=r["backup_timestamp_ms"],
             status=r["status"],
             daily_archive_id=r["daily_archive_id"],
             checksum_sha256=r["checksum_sha256"],
-            verified_at=datetime.fromisoformat(r["verified_at"]) if r["verified_at"] else None,
-            obs_deleted_at=datetime.fromisoformat(r["obs_deleted_at"]) if r["obs_deleted_at"] else None,
+            verified_at=datetime_fromisoformat(r["verified_at"]) if r["verified_at"] else None,
+            obs_deleted_at=datetime_fromisoformat(r["obs_deleted_at"]) if r["obs_deleted_at"] else None,
             obs_deleted_by=r["obs_deleted_by"],
             obs_etag=r["obs_etag"],
         )
@@ -629,8 +630,8 @@ class Catalog:
             xlog_lsn_start=r["xlog_lsn_start"], xlog_lsn_end=r["xlog_lsn_end"],
             xlog_time_start=r["xlog_time_start"], xlog_time_end=r["xlog_time_end"],
             checksum_sha256=r["checksum_sha256"], status=r["status"],
-            created_at=datetime.fromisoformat(r["created_at"]) if r["created_at"] else None,
-            archived_at=datetime.fromisoformat(r["archived_at"]) if r["archived_at"] else None,
+            created_at=datetime_fromisoformat(r["created_at"]) if r["created_at"] else None,
+            archived_at=datetime_fromisoformat(r["archived_at"]) if r["archived_at"] else None,
             manifest_json=r["manifest_json"],
         )
 

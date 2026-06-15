@@ -3,25 +3,51 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Union
 
 
-# ─── 备份对象状态机 ───
-BackupObjectStatus = Literal[
-    "discovered", "queued_for_archive",
-    "archived", "obs_deleted",
-]
-BackupType = Literal["full", "diff", "snapshot", "xlog", "metadata"]
-RestorePolicy = Literal["normal", "archive_only"]
+BackupObjectStatus = Union[str, None]
+BackupType = Union[str, None]
+RestorePolicy = Union[str, None]
+DailyArchiveStatus = Union[str, None]
+RestoreSessionStatus = Union[str, None]
 
-# ─── 周度归档状态 (二态, 与 SQL CHECK 对齐) ───
-DailyArchiveStatus = Literal["pending", "archived"]
 
-# ─── 恢复会话状态 ───
-RestoreSessionStatus = Literal[
-    "retrieving", "extracting", "uploading",
-    "restored", "cleaning", "cleaned", "failed",
-]
+_BACKUP_OBJECT_STATUS_VALUES = {"discovered", "queued_for_archive", "archived", "obs_deleted"}
+_BACKUP_TYPE_VALUES = {"full", "diff", "snapshot", "xlog", "metadata"}
+_RESTORE_POLICY_VALUES = {"normal", "archive_only"}
+_DAILY_ARCHIVE_STATUS_VALUES = {"pending", "archived"}
+_RESTORE_SESSION_STATUS_VALUES = {"retrieving", "extracting", "uploading", "restored", "cleaning", "cleaned", "failed"}
+
+
+def validate_backup_object_status(value: str) -> str:
+    if value not in _BACKUP_OBJECT_STATUS_VALUES:
+        raise ValueError(f"Invalid backup object status: {value!r}")
+    return value
+
+
+def validate_backup_type(value: str) -> str:
+    if value not in _BACKUP_TYPE_VALUES:
+        raise ValueError(f"Invalid backup type: {value!r}")
+    return value
+
+
+def validate_restore_policy(value: str) -> str:
+    if value not in _RESTORE_POLICY_VALUES:
+        raise ValueError(f"Invalid restore policy: {value!r}")
+    return value
+
+
+def validate_daily_archive_status(value: str) -> str:
+    if value not in _DAILY_ARCHIVE_STATUS_VALUES:
+        raise ValueError(f"Invalid daily archive status: {value!r}")
+    return value
+
+
+def validate_restore_session_status(value: str) -> str:
+    if value not in _RESTORE_SESSION_STATUS_VALUES:
+        raise ValueError(f"Invalid restore session status: {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
