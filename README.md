@@ -1,10 +1,10 @@
 # gaussdb-archive
 
-**GaussDB DBS 备份 → OBS → 归档目录 (周度打包 + PITR 恢复系统)**
+**GaussDB DBS 备份 → OBS → 归档目录 (周度/日度打包 + PITR 恢复系统)**
 
-自动发现 GaussDB 在 OBS 桶中的全量/差异/快照/xlog 备份,按**周度**(per-cluster 可配置起点 1-7)打包到配置的 `archive_dir` 目录,跳过元数据,严格按 xlog 时间窗过滤,清理已归档的 OBS 原始数据,并支持时间点恢复 (PITR)。
+自动发现 GaussDB 在 OBS 桶中的全量/差异/快照/xlog 备份,按**周度**或**日度**(per-cluster 可配置)打包到配置的 `archive_dir` 目录,跳过元数据,严格按 xlog 时间窗过滤,支持压缩/非压缩模式,清理已归档的 OBS 原始数据,并支持时间点恢复 (PITR)。
 
-> 16 个核心模块 · 141/141 测试通过 · 10 个原子 Commit
+> 16 个核心模块 · 148/148 测试通过 · 13 个原子 Commit
 
 ---
 

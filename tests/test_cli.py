@@ -56,3 +56,30 @@ def test_scheduler_defines_weekly_job():
     """确保 scheduler 模块暴露 weekly_archive_job。"""
     from scheduler import weekly_archive_job
     assert callable(weekly_archive_job)
+
+
+def test_pack_daily_subcommand():
+    from src.cli import build_parser
+    p = build_parser()
+    args = p.parse_args(["--config", "cfg.json", "pack-daily",
+                         "--cluster", "ncbs_busi", "--date", "2026-06-15"])
+    assert args.command == "pack-daily"
+    assert args.cluster == "ncbs_busi"
+    assert args.date == "2026-06-15"
+
+
+def test_pack_daily_default_date():
+    from src.cli import build_parser
+    p = build_parser()
+    args = p.parse_args(["--config", "cfg.json", "pack-daily",
+                         "--cluster", "ncbs_busi"])
+    assert args.date is None  # 默认今天
+
+
+def test_pack_all_days_subcommand():
+    from src.cli import build_parser
+    p = build_parser()
+    args = p.parse_args(["--config", "cfg.json", "pack-all-days",
+                         "--cluster", "ncbs_busi", "--stop-on-error"])
+    assert args.command == "pack-all-days"
+    assert args.stop_on_error is True

@@ -69,6 +69,50 @@ def build_weekly_manifest(
     }
 
 
+def build_daily_manifest(
+    instance_alias: str,
+    instance_id: str,
+    display_name: str,
+    bucket_name: str,
+    archive_date: str,
+    full_dirs: list[dict],
+    diff_dirs: list[dict],
+    snapshot_dirs: list[dict],
+    xlog_summary: dict,
+    metadata_skipped: int,
+    totals: dict,
+    checksum_sha256: str | None = None,
+) -> dict[str, Any]:
+    """构造 daily metadata.json dict。"""
+    return {
+        "schema_version": "2.0",
+        "archive_type": "daily",
+        "cluster": {
+            "alias": instance_alias,
+            "instance_id": instance_id,
+            "display_name": display_name,
+            "bucket": bucket_name,
+        },
+        "archive_period": {
+            "date_utc": f"{archive_date}T00:00:00+00:00",
+            "date_beijing": format_beijing_short(
+                datetime.fromisoformat(f"{archive_date}T00:00:00+00:00")
+            ) + " (UTC+8)",
+        },
+        "contents": {
+            "full_dirs": full_dirs,
+            "diff_dirs": diff_dirs,
+            "snapshot_dirs": snapshot_dirs,
+            "xlog_summary": xlog_summary,
+        },
+        "totals": {
+            **totals,
+            "metadata_skipped_count": metadata_skipped,
+        },
+        "checksum_sha256": checksum_sha256,
+    }
+
+
 def write_metadata(manifest: dict[str, Any], target: Path) -> None:
     """写 metadata.json 文件, UTF-8 + indent。"""
     target.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
@@ -152,6 +196,46 @@ def render_preview(manifest: dict[str, Any]) -> str:
     lines.append(f"周度范围: {period['week_start_beijing']} → {period['week_end_beijing']}")
     lines.append(f"周度范围 (UTC): {period['week_start_utc']} → {period['week_end_utc']}")
     lines.append(f"周起点: {period['week_start_day']} (1=周一..7=周日)")
+    lines.append("")
+    contents = manifest["contents"]
+    lines.extend(_dir_section("全量目录", contents["full_dirs"]))
+    lines.extend(_dir_section("差异目录", contents["diff_dirs"]))
+    lines.extend(_dir_section("快照目录", contents["snapshot_dirs"]))
+    xs = contents["xlog_summary"]
+    if xs["count"]:
+        lines.append(
+            f"\nxlog 文件 ({xs['count']} 个):"
+        )
+        lines.append(
+            f"  - last_modified 范围: {xs['last_modified_first_beijing']} → "
+            f"{xs['last_modified_last_beijing']}"
+        )
+        if xs.get("lsn_start"):
+            lines.append(f"  - LSN 范围: {xs['lsn_start']} → {xs['lsn_end']}")
+    totals = manifest["totals"]
+    if totals.get("metadata_skipped_count", 0) > 0:
+        lines.append(
+            f"\n元数据 (跳过, archive_only): {totals['metadata_skipped_count']} 个"
+        )
+    lines.append(
+        f"\n合计: full={totals.get('full_count', 0)} "
+        f"diff={totals.get('diff_count', 0)} "
+        f"snapshot={totals.get('snapshot_count', 0)} "
+        f"xlog={totals.get('xlog_count', 0)}"
+    )
+    return "\n".join(lines)
+
+
+def render_daily_preview(manifest: dict[str, Any]) -> str:
+    """把 daily manifest 渲染为人类可读的 preview 输出。"""
+    lines: list[str] = []
+    cluster = manifest["cluster"]
+    period = manifest["archive_period"]
+    lines.append(f"集群: {cluster['alias']} ({cluster['display_name']})")
+    lines.append(f"实例: {cluster['instance_id']}")
+    lines.append(f"桶: {cluster['bucket']}")
+    lines.append(f"归档日期: {period['date_beijing']}")
+    lines.append(f"归档日期 (UTC): {period['date_utc']}")
     lines.append("")
     contents = manifest["contents"]
     lines.extend(_dir_section("全量目录", contents["full_dirs"]))

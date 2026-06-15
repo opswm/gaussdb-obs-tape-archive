@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS daily_archives (
     instance_id     TEXT NOT NULL,
     archive_date    TEXT NOT NULL,
     archive_week_end TEXT,
+    archive_type    TEXT NOT NULL DEFAULT 'weekly' CHECK(archive_type IN ('daily','weekly')),
     archive_filename TEXT NOT NULL,
     backup_count    INTEGER NOT NULL DEFAULT 0,
     total_size_bytes BIGINT NOT NULL DEFAULT 0,
@@ -416,6 +417,49 @@ class Catalog:
         for r in self._conn().execute(sql, params):
             yield self._row_to_bo(r)
 
+    def list_backup_objects_daily(
+        self, instance_id: str, archive_date: str,
+    ) -> Iterable[BackupObject]:
+        """返回指定日期窗口内的非元数据、非 archive_only 对象。
+        - full/diff/snapshot: 按 backup_date = archive_date
+        - xlog: 按 obs_last_modified 落在 [date 00:00, date+1 00:00) UTC
+        - metadata / archive_only: 过滤掉
+        """
+        from datetime import datetime as _dt, timedelta
+        from src.utils import ensure_utc_aware
+        day_start = ensure_utc_aware(_dt.fromisoformat(f"{archive_date}T00:00:00+00:00"))
+        day_end = day_start + timedelta(days=1)
+        day_end_iso = day_end.isoformat()
+        sql = """SELECT * FROM backup_objects
+                 WHERE instance_id = ?
+                   AND status != 'obs_deleted'
+                   AND (restore_policy IS NULL OR restore_policy != 'archive_only')
+                   AND (
+                     (backup_type IN ('full','diff','snapshot')
+                      AND backup_date = ?)
+                     OR (backup_type = 'xlog'
+                      AND obs_last_modified >= ?
+                      AND obs_last_modified <  ?)
+                   )
+                 ORDER BY backup_type, parent_backup_dir, obs_key"""
+        day_start_iso = day_start.isoformat()
+        for r in self._conn().execute(sql, (instance_id, archive_date, day_start_iso, day_end_iso)):
+            yield self._row_to_bo(r)
+
+    def find_pending_daily_dates(
+        self, instance_id: str,
+    ) -> list[str]:
+        """返回该实例所有有待归档对象 (queued_for_archive) 的日期列表, 去重排序。"""
+        rows = self._conn().execute(
+            """SELECT DISTINCT backup_date
+               FROM backup_objects
+               WHERE instance_id = ?
+                 AND status = 'queued_for_archive'
+               ORDER BY backup_date""",
+            (instance_id,),
+        ).fetchall()
+        return [r["backup_date"] for r in rows]
+
     def mark_backup_object_obs_deleted(self, bo_id: int, run_id: str) -> None:
         with self.transaction() as c:
             c.execute(
@@ -454,16 +498,18 @@ class Catalog:
         with self.transaction() as c:
             cur = c.execute(
                 """INSERT INTO daily_archives
-                       (instance_id, archive_date, archive_week_end, archive_filename,
+                       (instance_id, archive_date, archive_week_end, archive_type,
+                        archive_filename,
                         backup_count, total_size_bytes, compressed_size_bytes,
                         full_count, diff_count, snapshot_count, xlog_count,
                         metadata_skipped_count,
                         full_dirs, diff_dirs, snapshot_dirs,
                         xlog_lsn_start, xlog_lsn_end, xlog_time_start, xlog_time_end,
                         checksum_sha256, status, manifest_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(instance_id, archive_date) DO UPDATE SET
                        archive_week_end=excluded.archive_week_end,
+                       archive_type=excluded.archive_type,
                        archive_filename=excluded.archive_filename,
                        backup_count=excluded.backup_count,
                        total_size_bytes=excluded.total_size_bytes,
@@ -482,6 +528,7 @@ class Catalog:
                        status=excluded.status,
                        manifest_json=excluded.manifest_json""",
                 (da.instance_id, da.archive_date, da.archive_week_end,
+                 da.archive_type,
                  da.archive_filename,
                  da.backup_count, da.total_size_bytes, da.compressed_size_bytes,
                  da.full_count, da.diff_count, da.snapshot_count, da.xlog_count,
@@ -570,6 +617,7 @@ class Catalog:
         return DailyArchive(
             id=r["id"], instance_id=r["instance_id"], archive_date=r["archive_date"],
             archive_week_end=r["archive_week_end"],
+            archive_type=r["archive_type"] if "archive_type" in r.keys() else "weekly",
             archive_filename=r["archive_filename"], backup_count=r["backup_count"],
             total_size_bytes=r["total_size_bytes"],
             compressed_size_bytes=r["compressed_size_bytes"],

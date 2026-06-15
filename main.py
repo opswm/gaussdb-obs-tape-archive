@@ -85,7 +85,8 @@ def main(argv: list[str] | None = None) -> int:
         ins = next(i for i in cfg.instances if i.alias == args.cluster)
         archive_dir = _archive_dir_or_die(cfg)
         p = Packer(obs, cat, Path(cfg.work_dir), archive_dir,
-                   compression_level=cfg.archive.compression_level)
+                   compression_level=cfg.archive.compression_level,
+                   compress=cfg.archive.compress)
         week_start, week_end = compute_week_range(
             date.fromisoformat(args.week_start)
             if args.week_start else dt.date.today(),
@@ -109,7 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         ins = next(i for i in cfg.instances if i.alias == args.cluster)
         archive_dir = _archive_dir_or_die(cfg)
         p = Packer(obs, cat, Path(cfg.work_dir), archive_dir,
-                   compression_level=cfg.archive.compression_level)
+                   compression_level=cfg.archive.compression_level,
+                   compress=cfg.archive.compress)
 
         weeks = find_pending_weeks(cat, ins.instance_id, ins.policy.week_start_day)
         if not weeks:
@@ -149,6 +151,73 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
 
         log.info(f"完成: {success_count} 成功, {fail_count} 失败 (共 {len(weeks)} 周)")
+        return 0 if fail_count == 0 else 1
+
+    if args.command == "pack-daily":
+        from src.packer import Packer
+        obs = _build_obs(cfg)
+        ins = next(i for i in cfg.instances if i.alias == args.cluster)
+        archive_dir = _archive_dir_or_die(cfg)
+        p = Packer(obs, cat, Path(cfg.work_dir), archive_dir,
+                   compression_level=cfg.archive.compression_level,
+                   compress=cfg.archive.compress)
+        archive_date = args.date or dt.date.today().isoformat()
+        result = p.pack_daily(ins.instance_id, archive_date, preview=args.preview)
+        if args.preview:
+            print(result.preview_text or "(空)")
+        else:
+            log.info(
+                f"packed daily: {result.archive_filename} "
+                f"sha256={result.checksum_sha256[:12] if result.checksum_sha256 else 'N/A'}..."
+            )
+        return 0
+
+    if args.command == "pack-all-days":
+        from src.packer import Packer
+        obs = _build_obs(cfg)
+        ins = next(i for i in cfg.instances if i.alias == args.cluster)
+        archive_dir = _archive_dir_or_die(cfg)
+        p = Packer(obs, cat, Path(cfg.work_dir), archive_dir,
+                   compression_level=cfg.archive.compression_level,
+                   compress=cfg.archive.compress)
+
+        dates = cat.find_pending_daily_dates(ins.instance_id)
+        if not dates:
+            log.info(f"集群 {ins.alias}: 没有待打包的日期")
+            return 0
+
+        log.info(f"集群 {ins.alias}: 发现 {len(dates)} 个待打包日期")
+        for d in dates:
+            log.info(f"  待打包: {d}")
+        log.info("")
+
+        success_count = 0
+        fail_count = 0
+        for d in dates:
+            log.info(f"开始打包: {d}")
+            try:
+                result = p.pack_daily(ins.instance_id, d)
+                if result.archive_path and result.archive_path.exists():
+                    if result.archive_path.is_file():
+                        actual_sha = p._sha256_file(result.archive_path)
+                    else:
+                        actual_sha = p._sha256_file(result.archive_path / "metadata.json")
+                    if actual_sha != result.checksum_sha256:
+                        raise ArchiveError(
+                            f"SHA256 校验失败: "
+                            f"expected={result.checksum_sha256[:12]}..., "
+                            f"actual={actual_sha[:12]}..."
+                        )
+                log.info(f"  OK {result.archive_filename}")
+                success_count += 1
+            except Exception as e:
+                log.error(f"  失败 {d}: {e}")
+                fail_count += 1
+                if args.stop_on_error:
+                    log.error("--stop-on-error 已设置, 中止")
+                    return 1
+
+        log.info(f"完成: {success_count} 成功, {fail_count} 失败 (共 {len(dates)} 天)")
         return 0 if fail_count == 0 else 1
 
     if args.command == "reap":

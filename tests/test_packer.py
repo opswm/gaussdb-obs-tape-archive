@@ -1,7 +1,8 @@
-"""Packer 周度打包测试。
+"""Packer 周度/日度打包测试。
 - pack_weekly 过滤 metadata / archive_only
+- pack_daily 按日打包 (压缩 + 非压缩)
 - xlog 时间窗 [week_start, week_end) 严格取
-- 目录命名 W{start}_{end}
+- 目录命名 W{start}_{end} (周) / {date}_{alias} (日)
 - metadata.json 含 Beijing time
 - 写 archive_dir
 - 幂等
@@ -79,8 +80,9 @@ def _bootstrap(tmp_path, with_metadata=True):
     return cat, obs
 
 
-def _packer(tmp_path, obs, cat):
-    return Packer(obs, cat, tmp_path / "work", tmp_path / "archive_dir")
+def _packer(tmp_path, obs, cat, compress=True):
+    return Packer(obs, cat, tmp_path / "work", tmp_path / "archive_dir",
+                  compress=compress)
 
 
 # ─── tests ───
@@ -239,3 +241,47 @@ def test_pack_weekly_preview_no_io(tmp_path):
     # catalog 中 daily_archive 仍空
     rows = list(cat._conn().execute("SELECT * FROM daily_archives"))
     assert rows == []
+
+
+# ─── daily pack tests ───
+def test_pack_daily_writes_to_archive_dir(tmp_path):
+    """日度打包: 压缩模式, 写 tar.gz。"""
+    cat, obs = _bootstrap(tmp_path, with_metadata=False)
+    p = _packer(tmp_path, obs, cat, compress=True)
+    result = p.pack_daily("i1", "2026-06-01")
+    assert result.archive_filename is not None
+    assert result.archive_filename.endswith(".tar.gz")
+    assert "ncbs_busi" in result.archive_filename
+    tar_path = tmp_path / "archive_dir" / result.archive_filename
+    assert tar_path.exists()
+
+
+def test_pack_daily_uncompressed(tmp_path):
+    """日度打包: 非压缩模式, 直接写目录。"""
+    cat, obs = _bootstrap(tmp_path, with_metadata=False)
+    p = _packer(tmp_path, obs, cat, compress=False)
+    result = p.pack_daily("i1", "2026-06-01")
+    assert result.archive_filename is not None
+    assert not result.archive_filename.endswith(".tar.gz")
+    dir_path = tmp_path / "archive_dir" / result.archive_filename
+    assert dir_path.is_dir()
+    assert (dir_path / "metadata.json").exists()
+
+
+def test_pack_daily_preview_no_io(tmp_path):
+    """日度 preview 不写盘。"""
+    cat, obs = _bootstrap(tmp_path)
+    p = _packer(tmp_path, obs, cat)
+    result = p.pack_daily("i1", "2026-06-01", preview=True)
+    assert result.preview is True
+    assert result.archive_filename is None
+    assert result.preview_text is not None
+    assert "归档日期" in result.preview_text
+
+
+def test_pack_daily_metadata_skipped(tmp_path):
+    """日度打包跳过 metadata。"""
+    cat, obs = _bootstrap(tmp_path, with_metadata=True)
+    p = _packer(tmp_path, obs, cat)
+    result = p.pack_daily("i1", "2026-06-01")
+    assert result.metadata_skipped >= 1

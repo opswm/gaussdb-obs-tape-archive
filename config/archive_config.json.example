@@ -61,6 +61,8 @@
   },
   "work_dir": "/data/archive_work",
   "archive": {
+    "mode": "weekly",
+    "compress": true,
     "required_manual_confirm_for_delete": true,
     "max_concurrent_pack_jobs": 3,
     "daily_archive_format": "tar.gz",

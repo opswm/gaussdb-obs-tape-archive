@@ -62,6 +62,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--stop-on-error", action="store_true",
                    help="任一周失败即中止 (默认: 记录错误并继续)")
 
+    s = sub.add_parser("pack-daily", help="日度打包")
+    s.add_argument("--cluster", required=True)
+    s.add_argument("--date", help="归档日期 YYYY-MM-DD (不传则取今天)")
+    s.add_argument("--preview", "--dry-run", action="store_true",
+                   dest="preview", help="预览模式: 不下载不写盘, 只输出计划清单")
+
+    s = sub.add_parser("pack-all-days", help="逐日打包所有待处理日 (适合首次大规模导入)")
+    s.add_argument("--cluster", required=True)
+    s.add_argument("--stop-on-error", action="store_true",
+                   help="任一日失败即中止 (默认: 记录错误并继续)")
+
     s = sub.add_parser("cluster", help="集群管理")
     ssub = s.add_subparsers(dest="cluster_command", required=True)
     ssub.add_parser("list")

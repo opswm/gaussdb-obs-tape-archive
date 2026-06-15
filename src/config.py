@@ -59,6 +59,8 @@ class CatalogConfig:
 
 @dataclass
 class ArchiveConfig:
+    mode: str
+    compress: bool
     required_manual_confirm_for_delete: bool
     max_concurrent_pack_jobs: int
     daily_archive_format: str
@@ -152,6 +154,8 @@ def load_config(path: str) -> AppConfig:
         )
         a = raw["archive"]
         archive = ArchiveConfig(
+            mode=a.get("mode", "weekly"),
+            compress=bool(a.get("compress", True)),
             required_manual_confirm_for_delete=bool(a.get("required_manual_confirm_for_delete", True)),
             max_concurrent_pack_jobs=int(a.get("max_concurrent_pack_jobs", 3)),
             daily_archive_format=a.get("daily_archive_format", "tar.gz"),

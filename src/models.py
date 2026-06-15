@@ -81,6 +81,7 @@ class DailyArchive:
     archive_date: str
     archive_filename: str
     archive_week_end: str | None = None
+    archive_type: str = "weekly"
     backup_count: int = 0
     total_size_bytes: int = 0
     compressed_size_bytes: int = 0
