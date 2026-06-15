@@ -17,9 +17,22 @@ from src.week_boundary import compute_week_range
 
 
 def _build_obs(cfg) -> ObsClient:
-    """当前默认使用 Mock OBS (内存模拟)。
-    接真实 OBS 时替换为: ObsClient.create_real(...)"""
-    return ObsClient.create_mock()
+    """根据配置创建 OBS 客户端。
+
+    - obs.use_mock=true (或未配置 access_key): 使用 Mock OBS (内存模拟)
+    - obs.use_mock=false + 真实凭证: 使用内置 obs SDK 对接真实华为云 OBS
+    """
+    obs_cfg = cfg.obs
+    if getattr(obs_cfg, "use_mock", False) or not obs_cfg.access_key:
+        return ObsClient.create_mock()
+    return ObsClient.create_real(
+        access_key=obs_cfg.access_key,
+        secret_key=obs_cfg.secret_key,
+        endpoint=obs_cfg.endpoint,
+        bucket=obs_cfg.bucket_name,
+        timeout=getattr(obs_cfg, "timeout", 60),
+        max_retry_count=getattr(obs_cfg, "max_retry_count", 3),
+    )
 
 
 def _archive_dir_or_die(cfg) -> Path:

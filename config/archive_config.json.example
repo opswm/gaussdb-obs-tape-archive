@@ -6,7 +6,10 @@
     "access_key": "env:OBS_ACCESS_KEY",
     "secret_key": "env:OBS_SECRET_KEY",
     "concurrency": 8,
-    "part_size_mb": 10
+    "part_size_mb": 10,
+    "use_mock": true,
+    "timeout": 60,
+    "max_retry_count": 3
   },
   "instances": [
     {

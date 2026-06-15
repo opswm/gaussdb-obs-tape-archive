@@ -31,6 +31,9 @@ class ObsConfig:
     secret_key: str
     concurrency: int = 8
     part_size_mb: int = 10
+    use_mock: bool = False
+    timeout: int = 60
+    max_retry_count: int = 3
 
 
 @dataclass
@@ -101,6 +104,9 @@ def load_config(path: str) -> AppConfig:
             secret_key=_resolve_env(obs_raw["secret_key"]),
             concurrency=obs_raw.get("concurrency", 8),
             part_size_mb=obs_raw.get("part_size_mb", 10),
+            use_mock=bool(obs_raw.get("use_mock", False)),
+            timeout=int(obs_raw.get("timeout", 60)),
+            max_retry_count=int(obs_raw.get("max_retry_count", 3)),
         )
 
         instances: list[InstanceConfig] = []
