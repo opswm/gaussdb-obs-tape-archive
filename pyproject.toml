@@ -1,14 +1,18 @@
 [project]
 name = "gaussdb-archive"
 version = "0.1.0"
-description = "GaussDB OBS backup archiver to IBM tape library"
+description = "GaussDB OBS backup archiver to archive directory"
 requires-python = ">=3.11"
 dependencies = [
-    "esdk-obs-python>=3.22",
-    "APScheduler>=3.10",
+    # 当前所有功能均使用 Python 标准库, 零外部依赖即可运行。
+    # esdk-obs-python 仅在对接真实华为云 OBS 时需要 (当前默认 Mock 模式).
+    # 内网环境无需安装任何 pip 包即可使用全部功能.
 ]
 
 [project.optional-dependencies]
+obs = [
+    "esdk-obs-python>=3.22",   # 仅真实 OBS 接入时需要
+]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",

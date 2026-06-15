@@ -14,6 +14,9 @@
 - [架构设计](#架构设计)
 - [执行流程](#执行流程)
 - [安装](#安装)
+  - [依赖分析](#依赖分析)
+  - [在线环境安装](#在线环境安装)
+  - [内网/离线环境部署](#内网离线环境部署)
 - [完整参数参考](#完整参数参考)
 - [子命令详细说明](#子命令详细说明)
 - [场景演练](#场景演练)
@@ -240,10 +243,51 @@ sequenceDiagram
 
 ## 安装
 
+### 依赖分析
+
+本程序**零外部 pip 依赖即可运行全部功能**。所有核心模块仅使用 Python 3.11+ 标准库:
+
+| 模块 | 使用的标准库 |
+|---|---|
+| `catalog.py` | `sqlite3`, `json`, `threading`, `uuid`, `contextlib`, `pathlib` |
+| `scanner.py` | `re`, `datetime` |
+| `packer.py` | `tarfile`, `hashlib`, `shutil`, `json`, `tempfile`, `os`, `pathlib` |
+| `manifest.py` | `json`, `datetime`, `pathlib` |
+| `reaper.py` | `uuid`, `dataclasses` |
+| `restorer.py` | `tarfile`, `hashlib`, `shutil`, `json`, `io`, `uuid`, `pathlib` |
+| `cleaner.py` | `dataclasses` |
+| `obs_client.py` | `abc`, `io`, `dataclasses` |
+| `config.py` | `json`, `os`, `re`, `pathlib` |
+| `cli.py` | `argparse` |
+| `utils.py` | `datetime`, `pathlib` |
+| `week_boundary.py` | `datetime` |
+| `storage_estimator.py` | `shutil`, `dataclasses`, `pathlib` |
+| `main.py` | `datetime`, `logging`, `sys`, `pathlib` |
+| `scheduler.py` | `datetime`, `logging`, `sys`, `uuid`, `pathlib` |
+
+**唯一可选外部依赖**:
+
+| 包名 | 用途 | 何时需要 |
+|---|---|---|
+| `esdk-obs-python` | 华为云 OBS SDK | **仅**在需要对接**真实**华为云 OBS 时安装。当前默认使用 Mock OBS (内存模拟), 无需此包。 |
+
+> **内网/离线环境**: 如果只跑 Mock 模式或开发测试, **不需要任何 pip 安装**, 直接 `python3 main.py` 即可运行。
+
+### 在线环境安装
+
 ```bash
 git clone https://github.com/opswm/gaussdb-obs-tape-archive.git
 cd gaussdb-obs-tape-archive
+
+# 基础安装 (零外部依赖即可运行)
 pip3 install -e .
+
+# 如需对接真实华为云 OBS:
+pip3 install -e ".[obs]"
+
+# 如需运行测试:
+pip3 install -e ".[dev]"
+
 cp config/archive_config.json.example config/archive_config.json
 $EDITOR config/archive_config.json
 ```
@@ -255,6 +299,114 @@ $EDITOR config/archive_config.json
 export OBS_ACCESS_KEY="<your_key>"
 export OBS_SECRET_KEY="<your_secret>"
 ```
+
+### 内网/离线环境部署 (银行等无法联网的场景)
+
+#### 方式 1: 零依赖部署 (推荐, 仅 Mock 模式)
+
+如果暂时不需要对接真实 OBS, 可以直接复制源码运行, **无需任何 pip 安装**:
+
+```bash
+# 在外网机器上下载源码
+git clone https://github.com/opswm/gaussdb-obs-tape-archive.git
+# 或直接下载 zip: https://github.com/opswm/gaussdb-obs-tape-archive/archive/refs/heads/master.zip
+
+# 将整个目录拷贝到内网机器 (U盘/堡垒机中转/内网 GitLab)
+scp -r gaussdb-obs-tape-archive user@internal-host:/data/
+
+# 在内网机器上直接运行 (无需 pip install)
+cd /data/gaussdb-obs-tape-archive
+cp config/archive_config.json.example config/archive_config.json
+$EDITOR config/archive_config.json
+
+# 验证
+python3 main.py --config config/archive_config.json cluster list
+python3 -m pytest   # 如果安装了 pytest
+```
+
+#### 方式 2: 离线安装 pip 包 (需要真实 OBS 或 pytest)
+
+如果内网需要对接**真实华为云 OBS**, 需要安装 `esdk-obs-python`。在外网机器上下载 wheel 包后传入内网:
+
+```bash
+# === 在外网机器上执行 ===
+mkdir -p /tmp/gaussdb-packages
+
+# 下载 esdk-obs-python 及所有传递依赖 (华为云 OBS SDK)
+pip3 download esdk-obs-python -d /tmp/gaussdb-packages/
+
+# 下载开发依赖 (可选, 仅需要跑测试时)
+pip3 download pytest pytest-cov -d /tmp/gaussdb-packages/
+
+# 查看下载了哪些文件
+ls -lh /tmp/gaussdb-packages/
+# 预期输出:
+#   esdk_obs_python-3.x.x-py3-none-any.whl
+#   (及其传递依赖, 通常很少)
+
+# 打包并传入内网
+tar -czf gaussdb-packages.tar.gz -C /tmp gaussdb-packages
+scp gaussdb-packages.tar.gz user@internal-host:/tmp/
+```
+
+```bash
+# === 在内网机器上执行 ===
+cd /tmp
+tar -xzf gaussdb-packages.tar.gz
+cd gaussdb-packages
+
+# 离线安装 (无需联网)
+pip3 install --no-index --find-links=. esdk-obs-python
+
+# 验证
+python3 -c "import obs; print('OBS SDK OK')"
+
+# 如果下载了 pytest:
+pip3 install --no-index --find-links=. pytest pytest-cov
+
+# 回到项目目录, 跑测试验证
+cd /data/gaussdb-obs-tape-archive
+python3 -m pytest
+```
+
+#### 方式 3: 完整离线 pip 环境 (包含所有依赖的 requirements.txt)
+
+```bash
+# === 在外网机器上执行 ===
+cd gaussdb-obs-tape-archive
+
+# 导出完整依赖树 (含传递依赖)
+pip3 install -e ".[obs,dev]"
+pip3 freeze > requirements-freeze.txt
+
+# 下载所有包到本地
+pip3 download -r requirements-freeze.txt -d ./offline-packages/
+
+# 打包
+tar -czf gaussdb-offline.tar.gz offline-packages/ requirements-freeze.txt
+scp gaussdb-offline.tar.gz user@internal-host:/data/
+```
+
+```bash
+# === 在内网机器上执行 ===
+cd /data
+tar -xzf gaussdb-offline.tar.gz
+cd gaussdb-obs-tape-archive
+
+# 离线安装全部依赖
+pip3 install --no-index --find-links=../offline-packages/ -r ../requirements-freeze.txt
+
+# 验证
+python3 -m pytest
+```
+
+#### Python 版本要求
+
+- **最低**: Python 3.11+
+- **推荐**: Python 3.12+ (tarfile filter 支持更好)
+- **验证**: `python3 --version`
+
+如果内网机器 Python 版本过低, 需要先升级 Python (可从 python.org 下载 macOS/Linux 安装包或源码编译, 通过 U 盘传入内网)。
 
 ---
 
