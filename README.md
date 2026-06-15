@@ -29,14 +29,15 @@
 
 ## 项目目标
 
-DBS 备份在 OBS 上累积后,会长期占用对象存储成本。本系统在不打破 PITR 能力的前提下,将每周备份**周度打包**转储到 `archive_dir` (即"磁带库映射目录"),并清理 OBS。
+DBS 备份在 OBS 上累积后,会长期占用对象存储成本。本系统在不打破 PITR 能力的前提下,将备份**周度或日度打包**转储到 `archive_dir`,并清理 OBS。
 
 **核心约束**:
 - **不丢恢复能力**: 转储后,任意历史时间点仍可恢复到 OBS (只要在 `retention_days` 窗口内)
 - **Reaper 永不自启**: 删除线上 OBS 数据是单向破坏性操作,必须人工二次确认 (或显式 `--yes`)
 - **集群隔离**: 多 GaussDB 实例共享同一份代码和归档目录,按 `instance_id` 严格隔离
 - **状态可重入**: 任何步骤中断后可从 catalog 恢复进度,无需重新扫描
-- **周度边界可配**: 每集群独立 `week_start_day` (1=周一..7=周日),ncbs_busi 周六全备,trgl_busi 周二,等
+- **周度/日度可选**: `archive.mode: "weekly"|"daily"`, 周度按 `week_start_day` 边界, 日度按 `backup_date`
+- **压缩可控**: `archive.compress: true|false`, false 时直接拷贝文件到目录, 不打包 tar.gz
 - **xlog-only**: `Log/` 目录仅打包 xlog 分片,5 类元数据 (obs_last_clean_record 等) 与根级 metadata 一律跳过
 
 ---
@@ -50,8 +51,8 @@ flowchart LR
   OBS[OBS 桶<br/>GaussDB 备份] -->|扫描| Scanner
   Scanner -->|写入| Catalog[(SQLite<br/>8 表状态)]
   Catalog -->|拉取| Packer
-  Packer -->|打包+SHA256| TAR[tar.gz + metadata.json]
-  TAR -->|写入| AD[archive_dir<br/>= 磁带库映射目录]
+  Packer -->|打包+SHA256| TAR[tar.gz 或目录 + metadata.json]
+  TAR -->|写入| AD[archive_dir]
   Reaper -->|二次确认| OBS
   Reaper -->|标记| Catalog
   Catalog -->|检索| Restorer
@@ -67,9 +68,9 @@ flowchart LR
 |---|---|
 | `src/catalog.py` | SQLite 8 表状态库,事务隔离,UPSERT 语义 |
 | `src/scanner.py` | OBS 增量扫描,PITR 链自动重建,元数据归档但不上传 |
-| `src/packer.py` | 周度打包 → tar.gz + metadata.json,过滤 metadata, xlog 时间窗,直接写 archive_dir |
-| `src/manifest.py` | metadata.json 构造: 集群 + 周度范围 (UTC+Beijing) + 详细目录条目 + xlog 摘要 |
-| `src/storage_estimator.py` | 待归档存储估算 + 磁盘空间预检 (pack-all-weeks 必备) |
+| `src/packer.py` | 周度/日度打包到 archive_dir,过滤 metadata, xlog 时间窗,支持压缩/非压缩 |
+| `src/manifest.py` | metadata.json 构造: 集群 + 周期范围 (UTC+Beijing) + 详细目录条目 + xlog 摘要 |
+| `src/storage_estimator.py` | 待归档存储估算 + 磁盘空间预检 (pack-all-weeks/pack-all-days 必备) |
 | `src/utils.py` | 时区工具: utc_to_beijing, format_beijing |
 | `src/week_boundary.py` | 周度边界计算: compute_week_range(today, week_start_day) |
 | `src/reaper.py` | 5 道安全门禁 + ETag 二次校验,标记 `obs_deleted` |
@@ -80,22 +81,29 @@ flowchart LR
 | `src/models.py` | dataclass: `Policy` / `BackupObject` / `DailyArchive` / `RestoreSession` |
 | `src/errors.py` | 异常层级 (`ArchiveError` 基类) |
 | `src/config.py` | 加载 `archive_config.json` |
-| `src/cli.py` | argparse 子命令定义 (9 个子命令 + cluster 子解析器) |
+| `src/cli.py` | argparse 子命令定义 (12 个子命令 + cluster 子解析器) |
 
-### 归档目录 (archive_dir) 即磁带库
+### 归档目录 (archive_dir)
 
-`archive_dir` 字段 (顶层, 替代旧的 `tape` 段) 指定一个**目录路径**。该目录就是"磁带库的映射目录":
-- Packer 把周度 `tar.gz` 写入该目录
-- Restorer 从该目录读 `tar.gz` (按 `daily_archives.archive_filename`)
+`archive_dir` 字段 (顶层配置) 指定一个**目录路径**。Packer 把归档文件写入该目录,Restorer 从该目录读取:
+- 压缩模式 (`compress=true`): 写 `{name}.tar.gz`
+- 非压缩模式 (`compress=false`): 写 `{name}/` 目录,内含备份文件 + `metadata.json`
 - 无需磁带卷管理、无需 position、无需 quota、无需回读校验 (本地 SHA256 即可)
 
-### 周度归档命名
+### 归档命名
 
+**周度** (`mode: "weekly"`):
 ```
 {alias}_W{start_YYYYMMDD}_{end_YYYYMMDD}.tar.gz
 ```
+例: `ncbs_busi_W20260530_20260606.tar.gz`
 
-例: `ncbs_busi_W20260530_20260606.tar.gz` (周六起点 ncbs_busi)
+**日度** (`mode: "daily"`):
+```
+{date_YYYYMMDD}_{alias}.tar.gz          # 压缩
+{date_YYYYMMDD}_{alias}/                # 非压缩
+```
+例: `20260601_ncbs_busi.tar.gz` 或 `20260601_ncbs_busi/`
 
 ### PITR 链
 
@@ -119,9 +127,17 @@ scan → queued_for_archive → pack_weekly (per-cluster 当前周) → archive_
    └─ Reaper 永不自启, 单独人工触发子命令 reap --week-start YYYY-MM-DD
 ```
 
-**流水线简化**: 移除原 `scan → pack → archive` 三阶段,改为 `scan → pack_weekly` 两阶段。`pack_weekly` 直接把 `tar.gz` 写到 `archive_dir`,完成后 daily_archive 立即 `archived`, backup_objects 立即 `archived`。
+### 日度流水线
 
-### metadata.json (内含 tar.gz)
+```
+scan → queued_for_archive → pack_daily (per-cluster 指定日期) → archive_dir
+   │         │                       │
+   │         │                       └─ 过滤 metadata / archive_only; xlog 按日期时间窗
+   │         └─ 调度器自动推进 (discovered → queued_for_archive)
+   └─ Reaper 永不自启
+```
+
+### metadata.json
 
 ```json
 {
@@ -165,9 +181,19 @@ scan → queued_for_archive → pack_weekly (per-cluster 当前周) → archive_
 }
 ```
 
+日度模式下的 `archive_period`:
+```json
+{
+  "archive_period": {
+    "date_utc": "2026-06-15T00:00:00+00:00",
+    "date_beijing": "2026-06-15 08:00:00 (UTC+8)"
+  }
+}
+```
+
 ### Preview 模式 (--preview)
 
-`pack-weekly --preview` 输出**人类可读**计划清单, 含 Beijing time 转换:
+`pack-weekly --preview` 或 `pack-daily --preview` 输出**人类可读**计划清单, 含 Beijing time 转换:
 
 ```
 集群: ncbs_busi (核心)
@@ -200,8 +226,8 @@ sequenceDiagram
     Cat-->>CLI: {base, diffs, session_id, required_daily_archives}
     Op->>CLI: restore --session-id <sid>
     CLI->>Cat: create_restore_session
-    CLI->>AD: 读所需 tar.gz (按 archive_filename)
-    AD-->>CLI: tar.gz 流
+    CLI->>AD: 读所需归档 (按 archive_filename)
+    AD-->>CLI: 归档数据
     CLI->>CLI: 解压到 staging
     CLI->>OBS: 上传 backup_objects (跳过 archive_only)
     CLI->>Cat: update_restore_session status='restored'
@@ -237,15 +263,15 @@ export OBS_SECRET_KEY="<your_secret>"
 | 参数 | 类型 | 默认值 | 适用命令 | 说明 |
 |---|---|---|---|---|
 | `--config` | PATH | **必填** | 全部 | `archive_config.json` 路径 |
-| `--cluster` | STRING | 必填/可选 | `scan` (可选), `pack-weekly`/`pack`/`pack-all-weeks`/`reap`/`restore-plan`/`restore`/`status`/`cluster show` (必填) | 集群 `alias`(如 `ncbs_busi`) |
+| `--cluster` | STRING | 必填/可选 | `scan` (可选), `pack-weekly`/`pack`/`pack-daily`/`pack-all-weeks`/`pack-all-days`/`reap`/`restore-plan`/`restore`/`status`/`cluster show` (必填) | 集群 `alias`(如 `ncbs_busi`) |
 | `--week-start` | YYYY-MM-DD | 当前周 | `pack-weekly`/`pack`/`pack-all-weeks`/`reap`/`status` | 周起始日;`pack-weekly` 不传则取本集群当前周,`reap` 必填 |
-| `--preview` / `--dry-run` | flag | `False` | `pack-weekly`/`pack` | 预览模式,仅输出计划不下载不写盘 |
+| `--date` | YYYY-MM-DD | 今天 | `pack-daily`/`pack-all-days` | 归档日期;不传则取今天 |
+| `--preview` / `--dry-run` | flag | `False` | `pack-weekly`/`pack`/`pack-daily` | 预览模式,仅输出计划不下载不写盘 |
 | `--target` | "YYYY-MM-DD HH:MM:SS" | **必填** | `restore-plan`/`restore` | PITR 目标时间 (Beijing time) |
 | `--session-id` | UUID/字符串 | **必填** | `restore`/`cleanup` | 恢复会话 ID, 由 `restore-plan` 生成 |
 | `--dry-run` | flag | `False` | `reap` | 仅显示将被删除的对象,不做任何 IO |
 | `--yes` | flag | `False` | `reap`/`restore`/`cleanup` | 跳过交互式确认,**危险**:直接执行破坏性操作,自动化场景使用 |
-| `--stop-on-error` | flag | `False` | `pack-all-weeks` | 任一周失败立即中止,默认记录错误继续后续周 |
-| `--date` | YYYY-MM-DD | - | `pack` (别名) | **已废弃**, 请用 `--week-start` |
+| `--stop-on-error` | flag | `False` | `pack-all-weeks`/`pack-all-days` | 任一周/日失败立即中止,默认记录错误继续 |
 
 **退出码**:
 | 退出码 | 含义 |
@@ -253,7 +279,7 @@ export OBS_SECRET_KEY="<your_secret>"
 | `0` | 成功 |
 | `1` | 一般业务错误 (配置缺失/参数错误/权限不足) |
 | `2` | Reaper 5 道门禁未通过 (`UnsafeDeleteError`) |
-| `3` | 磁盘空间不足 (pack-all-weeks/storage_estimator 预检失败) |
+| `3` | 磁盘空间不足 (storage_estimator 预检失败) |
 | `4` | 恢复链路缺失 (无 PITR 链匹配 target_time) |
 
 ---
@@ -358,7 +384,51 @@ xlog 文件 (28 个):
 
 ---
 
-### 3. `pack-all-weeks` — 逐周打包所有待处理周 (首次大规模导入)
+### 3. `pack-daily` — 日度打包
+
+```bash
+# 当天 (按 backup_date 过滤)
+python3 main.py --config config/archive_config.json pack-daily --cluster ncbs_busi
+
+# 指定日期
+python3 main.py --config config/archive_config.json pack-daily --cluster ncbs_busi --date 2026-06-15
+
+# 预览
+python3 main.py --config config/archive_config.json pack-daily --cluster ncbs_busi --preview
+```
+
+**参数说明**:
+- `--cluster`(必填): 集群 alias
+- `--date`(可选): 归档日期 YYYY-MM-DD;不传则取今天
+- `--preview`/`--dry-run`(flag): 仅打印计划,不做任何 IO
+
+**典型输出 (压缩模式, compress=true)**:
+```
+[2026-06-15 02:05:01] ncbs_busi: 准备打包日期 2026-06-15
+[2026-06-15 02:05:02]   全量 1, 差异 0, 快照 0, xlog 12, metadata 跳过 2
+[2026-06-15 02:05:02]   下载 OBS 对象: 100%|████████████| 13/13 [00:15<00:00, 0.87 it/s]
+[2026-06-15 02:05:17]   打包: /archive/20260615_ncbs_busi.tar.gz
+[2026-06-15 02:05:20]   计算 SHA256: b4e2c9f1d3a5...
+[2026-06-15 02:05:20]   更新 catalog: daily_archive_id=256, status=archived, archive_type=daily
+[2026-06-15 02:05:20] 完成 (耗时 19.2s)
+```
+
+**典型输出 (非压缩模式, compress=false)**:
+```
+[2026-06-15 02:05:01] ncbs_busi: 准备打包日期 2026-06-15
+[2026-06-15 02:05:02]   全量 1, 差异 0, 快照 0, xlog 12, metadata 跳过 2
+[2026-06-15 02:05:02]   下载 OBS 对象: 100%|████████████| 13/13 [00:15<00:00, 0.87 it/s]
+[2026-06-15 02:05:17]   拷贝到: /archive/20260615_ncbs_busi/
+[2026-06-15 02:05:18]   计算 SHA256 (metadata.json): b4e2c9f1d3a5...
+[2026-06-15 02:05:18]   更新 catalog: daily_archive_id=257, status=archived, archive_type=daily
+[2026-06-15 02:05:18] 完成 (耗时 17.1s)
+```
+
+**退出码**: `0` 成功,`3` 磁盘空间不足
+
+---
+
+### 4. `pack-all-weeks` — 逐周打包所有待处理周 (首次大规模导入)
 
 ```bash
 # 逐周打包该集群所有 queued_for_archive 对象
@@ -415,7 +485,40 @@ archive_dir 可用空间: 18.3 TB
 
 ---
 
-### 4. `reap` — 安全删除 OBS 原始数据
+### 5. `pack-all-days` — 逐日打包所有待处理日
+
+```bash
+# 逐日打包该集群所有 queued_for_archive 对象
+python3 main.py --config config/archive_config.json pack-all-days --cluster ncbs_busi
+
+# 失败立即中止
+python3 main.py --config config/archive_config.json pack-all-days --cluster ncbs_busi --stop-on-error
+```
+
+**参数说明**:
+- `--cluster`(必填): 集群 alias
+- `--stop-on-error`(flag): 任一日失败立即中止;默认记录错误并继续
+
+**典型输出**:
+```
+[2026-06-15 03:00:01] ncbs_busi: 发现 7 个待打包日期
+[2026-06-15 03:00:01]   待打包: 2026-06-08, 2026-06-09, 2026-06-10, 2026-06-11, 2026-06-12, 2026-06-13, 2026-06-14
+
+[2026-06-15 03:00:02] ==========================================
+[2026-06-15 03:00:02] [1/7] 日期 2026-06-08
+[2026-06-15 03:00:20] [1/7]  ✓ 完成: 20260608_ncbs_busi.tar.gz (2.1 GB)
+[2026-06-15 03:00:20] [2/7] 日期 2026-06-09
+[2026-06-15 03:00:38] [2/7]  ✓ 完成: 20260609_ncbs_busi.tar.gz (2.3 GB)
+...
+[2026-06-15 03:02:30] 全部完成: 7/7 天成功, 0 失败
+[2026-06-15 03:02:30] 总耗时: 148.5s
+```
+
+**退出码**: `0` 全部成功,失败天数 > 0 时退出码为 `1`
+
+---
+
+### 6. `reap` — 安全删除 OBS 原始数据
 
 ```bash
 # Dry run (查看将被删除的对象)
@@ -467,7 +570,7 @@ python3 main.py --config config/archive_config.json reap --cluster ncbs_busi --w
 
 ---
 
-### 5. `restore-plan` — 生成 PITR 恢复计划
+### 7. `restore-plan` — 生成 PITR 恢复计划
 
 ```bash
 python3 main.py --config config/archive_config.json restore-plan --cluster ncbs_busi --target "2026-06-04 14:30:00"
@@ -497,7 +600,7 @@ python3 main.py --config config/archive_config.json restore-plan --cluster ncbs_
 
 ---
 
-### 6. `restore` — 执行 PITR 恢复
+### 8. `restore` — 执行 PITR 恢复
 
 ```bash
 # 交互式确认
@@ -516,7 +619,7 @@ python3 main.py --config config/archive_config.json restore --cluster ncbs_busi 
 **典型输出**:
 ```
 [2026-06-12 10:05:01] ncbs_busi: 开始恢复 session=rs_20260612_100001_a3f2b9
-[2026-06-12 10:05:01]   读取 tar.gz: ncbs_busi_W20260530_20260606.tar.gz (18.4 GB)
+[2026-06-12 10:05:01]   读取归档: ncbs_busi_W20260530_20260606.tar.gz (18.4 GB)
 [2026-06-12 10:05:34]   解压 staging: /data/archive_work/restore/rs_20260612_100001_a3f2b9
 [2026-06-12 10:05:48]   过滤 archive_only: 跳过 12 个 metadata
 [2026-06-12 10:05:48]   待恢复对象: 35 个
@@ -532,7 +635,7 @@ python3 main.py --config config/archive_config.json restore --cluster ncbs_busi 
 
 ---
 
-### 7. `cleanup` — 清理已恢复数据
+### 9. `cleanup` — 清理已恢复数据
 
 ```bash
 # 交互式确认
@@ -566,7 +669,7 @@ python3 main.py --config config/archive_config.json cleanup --session-id rs_2026
 
 ---
 
-### 8. `status` — 查看集群归档状态
+### 10. `status` — 查看集群归档状态
 
 ```bash
 # 集群汇总
@@ -578,7 +681,7 @@ python3 main.py --config config/archive_config.json status --cluster ncbs_busi -
 
 **参数说明**:
 - `--cluster`(必填)
-- `--week-start`(可选): 不传则汇总全部周
+- `--week-start`(可选): 不传则汇总全部
 
 **典型输出 (汇总)**:
 ```
@@ -593,38 +696,22 @@ catalog 统计:
   - archived: 12,700
   - obs_deleted: 112
 
-周度归档 (最近 5 周):
-  2026-05-30 ~ 2026-06-06  status=archived  tar.gz=18.4 GB  objects=35
-  2026-05-23 ~ 2026-05-29  status=archived  tar.gz=17.2 GB  objects=33
-  2026-05-16 ~ 2026-05-22  status=archived  tar.gz=16.8 GB  objects=31
-  2026-05-09 ~ 2026-05-15  status=archived  tar.gz=15.9 GB  objects=30
-  2026-05-02 ~ 2026-05-08  status=archived  tar.gz=15.3 GB  objects=29
+归档 (最近 5):
+  2026-05-30 ~ 2026-06-06  type=weekly  status=archived  size=18.4 GB  objects=35
+  2026-05-23 ~ 2026-05-29  type=weekly  status=archived  size=17.2 GB  objects=33
+  2026-06-15                 type=daily   status=archived  size=2.1 GB   objects=13
+  2026-06-14                 type=daily   status=archived  size=2.3 GB   objects=14
+  2026-06-13                 type=daily   status=archived  size=2.0 GB   objects=12
 
 PITR 链: 6 条活跃
 待归档预估: 87.2 GB
-```
-
-**典型输出 (指定周)**:
-```
-集群: ncbs_busi
-周: 2026-05-30 → 2026-06-06
-daily_archive: id=128, status=archived
-  文件: /data/tape-mapping/ncbs_busi_W20260530_20260606.tar.gz
-  大小: 18.4 GB
-  SHA256: a3f2b9c1d4e5...
-  created: 2026-06-12 02:06:31
-
-backup_objects: 35 个
-  - 1 full, 6 diff, 0 snapshot, 28 xlog
-  - 0 metadata (跳过)
-  - 状态分布: archived=35, obs_deleted=35
 ```
 
 **退出码**: `0` 成功
 
 ---
 
-### 9. `cluster` — 集群管理
+### 11. `cluster` — 集群管理
 
 ```bash
 # 列出所有集群
@@ -705,7 +792,37 @@ sha256sum /data/tape-mapping/ncbs_busi_W20260530_20260606.tar.gz
 
 ---
 
-### 场景 2: 首次大规模导入 (几十 TB 历史数据)
+### 场景 2: 日常日度归档
+
+**目标**: 每天凌晨自动扫描并打包当天数据,适合每日全备的集群。
+
+```bash
+# Step 1: 扫描
+python3 main.py --config config/archive_config.json scan --cluster ncbs_busi
+
+# Step 2: 日度打包 (当天)
+python3 main.py --config config/archive_config.json pack-daily --cluster ncbs_busi
+# 压缩模式: 生成 /archive/20260615_ncbs_busi.tar.gz
+# 非压缩模式 (compress=false): 生成 /archive/20260615_ncbs_busi/ 目录
+
+# Step 3: 验证
+ls -lh /archive/20260615_ncbs_busi.tar.gz
+tar -tzf /archive/20260615_ncbs_busi.tar.gz | head -20
+# 或非压缩模式:
+ls /archive/20260615_ncbs_busi/
+```
+
+**crontab 配置** (自动日度 scan + pack):
+```bash
+# 每天 02:30 跑日度流水线
+30 2 * * * cd /data/gaussdb-archive && \
+  python3 main.py --config config/archive_config.json scan && \
+  python3 main.py --config config/archive_config.json pack-daily --cluster ncbs_busi >> /var/log/gaussdb-archive/daily.log 2>&1
+```
+
+---
+
+### 场景 3: 首次大规模导入 (几十 TB 历史数据)
 
 **目标**: 一次性导入过去 6 个月积累的未归档数据,按周逐个打包。
 
@@ -719,10 +836,10 @@ python3 main.py --config config/archive_config.json pack-all-weeks --cluster ncb
 # 在自动执行前会先打印存储估算:
 #   待归档总大小: 28.4 TB
 #   archive_dir 可用空间: 50.0 TB
-#   磁盘空间: 充足 (需要 ~56.8 TB, 可用 50.0 TB)  ← 如果不充足会警告并要求确认
+#   磁盘空间: 充足 (需要 ~56.8 TB, 可用 50.0 TB)
 # 按周分解: 26 个待处理周 (约 1.1 TB/周)
 
-# Step 3: 后台监控 (耗时 4-8 小时, 启用 --yes 跳过每周末的 cron 提示)
+# Step 3: 后台监控 (耗时 4-8 小时)
 nohup python3 main.py --config config/archive_config.json pack-all-weeks --cluster ncbs_busi --stop-on-error \
   > /var/log/gaussdb-archive/import.log 2>&1 &
 IMPORT_PID=$!
@@ -735,19 +852,19 @@ tail -f /var/log/gaussdb-archive/import.log
 # Step 5: 验证
 ps -p $IMPORT_PID && echo "still running" || echo "completed"
 python3 main.py --config config/archive_config.json status --cluster ncbs_busi
-# 预期: queued_for_archive=0, archived 数量增加
 ls /data/tape-mapping/ncbs_busi_*.tar.gz | wc -l
 # 预期: 26 个文件
 ```
 
 **关键点**:
 - `pack-all-weeks` 默认记录错误并继续,如果需要严格模式加 `--stop-on-error`
+- 日度大规模导入同理,用 `pack-all-days`
 - 存储估算提前到首次执行前,**避免** 30TB 打包到一半才发现磁盘不够
 - 用 `nohup` + 后台日志避免 SSH 断开导致中断
 
 ---
 
-### 场景 3: PITR 恢复演练
+### 场景 4: PITR 恢复演练
 
 **目标**: 验证归档数据可恢复到 OBS,测试目标时间点 2026-06-04 14:30:00。
 
@@ -755,13 +872,12 @@ ls /data/tape-mapping/ncbs_busi_*.tar.gz | wc -l
 # Step 1: 生成恢复计划
 python3 main.py --config config/archive_config.json restore-plan --cluster ncbs_busi --target "2026-06-04 14:30:00"
 # 预期输出: session_id=rs_20260612_100001_a3f2b9
-# 记录这个 ID, 后续步骤使用
 
 SESSION_ID=rs_20260612_100001_a3f2b9
 
 # Step 2: 人工 review 计划
 python3 main.py --config config/archive_config.json status --cluster ncbs_busi
-# 确认对应周的 daily_archive 存在且 SHA256 校验通过
+# 确认对应周/日的 daily_archive 存在且 SHA256 校验通过
 
 # Step 3: 执行恢复 (交互式)
 python3 main.py --config config/archive_config.json restore \
@@ -772,13 +888,11 @@ python3 main.py --config config/archive_config.json restore \
 
 # Step 4: 验证恢复结果
 python3 obsutil ls obs://dbsbucket-0-tj01-xxxx/$INSTANCE_ID/ --recursive | grep "$(date +%Y%m%d)"
-# 预期: 看到 35 个恢复的对象
 python3 main.py --config config/archive_config.json status --cluster ncbs_busi
 # 预期: restore_sessions 表中 status=restored
 
 # Step 5: 测试完成,清理恢复数据
 python3 main.py --config config/archive_config.json cleanup --session-id $SESSION_ID
-# 预期: 提示 "将删除 35 个 OBS 恢复对象", 人工输入 y
 
 # Step 6: 验证清理
 python3 main.py --config config/archive_config.json status --cluster ncbs_busi
@@ -794,12 +908,12 @@ python3 main.py --config config/archive_config.json restore \
 
 ---
 
-### 场景 4: 清理已归档的 OBS 原始数据
+### 场景 5: 清理已归档的 OBS 原始数据
 
-**目标**: 周度打包完成后,清理 OBS 上的原始备份以释放空间。**破坏性操作,务必先 dry-run。**
+**目标**: 打包完成后,清理 OBS 上的原始备份以释放空间。**破坏性操作,务必先 dry-run。**
 
 ```bash
-# Step 1: 确认 pack-weekly 已完成
+# Step 1: 确认打包已完成
 python3 main.py --config config/archive_config.json status --cluster ncbs_busi --week-start 2026-05-30
 # 预期: status=archived, SHA256 已计算
 
@@ -810,19 +924,16 @@ sha256sum /data/tape-mapping/ncbs_busi_W20260530_20260606.tar.gz
 # Step 3: Dry-run Reap
 python3 main.py --config config/archive_config.json reap \
   --cluster ncbs_busi --week-start 2026-05-30 --dry-run
-# 预期: 5 道门禁预检全部通过, 列出将被删除的 35 个对象 (87.2 GB)
+# 预期: 5 道门禁预检全部通过, 列出将被删除的对象
 
 # Step 4: 实际 Reap (交互式)
 python3 main.py --config config/archive_config.json reap \
   --cluster ncbs_busi --week-start 2026-05-30
-# 预期: 提示确认, 输入 y, 删除 35 个 OBS 对象
+# 预期: 提示确认, 输入 y, 删除 OBS 对象
 
 # Step 5: 验证
 python3 main.py --config config/archive_config.json status --cluster ncbs_busi --week-start 2026-05-30
-# 预期: 35 个 backup_objects 状态 obs_deleted
-
-python3 obsutil ls obs://dbsbucket-0-tj01-xxxx/$INSTANCE_ID/ --recursive | wc -l
-# 预期: 对象数减少 35 (或 47, 含 12 个 metadata)
+# 预期: backup_objects 状态 obs_deleted
 ```
 
 **批量清理脚本** (按周依次,加 `--yes` 跳过确认):
@@ -836,38 +947,27 @@ done
 
 ---
 
-### 场景 5: 多集群管理 (不同 week_start_day)
+### 场景 6: 多集群管理 (不同 week_start_day)
 
 **目标**: 同时管理 ncbs_busi (周六) 和 trgl_busi (周二) 的归档,周度边界不冲突。
 
 ```bash
 # Step 1: 扫描所有集群
 python3 main.py --config config/archive_config.json scan
-# 预期: ncbs_busi 当前周 2026-05-30~2026-06-06, trgl_busi 当前周 2026-05-26~2026-06-02
 
 # Step 2: 查看集群列表确认策略
 python3 main.py --config config/archive_config.json cluster list
 # 预期:
 #   ncbs_busi  week_start_day=6 (周六)
 #   trgl_busi  week_start_day=2 (周二)
-#   itps_busi  week_start_day=4 (周四)
 
-# Step 3: 分别打包 (注意不传 --week-start 时各自取当前周)
+# Step 3: 分别打包
 python3 main.py --config config/archive_config.json pack-weekly --cluster ncbs_busi
-# 预期: 生成 ncbs_busi_W20260530_20260606.tar.gz
-
 python3 main.py --config config/archive_config.json pack-weekly --cluster trgl_busi
-# 预期: 生成 trgl_busi_W20260526_20260602.tar.gz
 
 # Step 4: 验证互不干扰
 python3 main.py --config config/archive_config.json status --cluster ncbs_busi
 python3 main.py --config config/archive_config.json status --cluster trgl_busi
-# 预期: 两个集群 catalog 独立, daily_archives 按 instance_id 隔离
-
-# Step 5: 跨集群 PITR (互不影响)
-python3 main.py --config config/archive_config.json restore-plan \
-  --cluster ncbs_busi --target "2026-06-04 14:30:00"
-# 预期: 只匹配 ncbs_busi 的 PITR 链
 ```
 
 **关键点**:
@@ -886,25 +986,26 @@ python3 main.py --config config/archive_config.json restore-plan \
 | `instance_mappings` | `instance_id` | 集群元数据 (alias / display_name / bucket / enabled) |
 | `cluster_archive_policies` | `instance_id` | 归档策略 (4 个 archive_* 开关 + retention + xlog 窗口 + `week_start_day`) |
 | `backup_objects` | `id`, `obs_key UNIQUE` | OBS 原始对象清单 + 状态机 |
-| `daily_archives` | `id`, `(instance_id, archive_date) UNIQUE` | 周度归档包 (一个 tar.gz; `archive_date` = 周起始日) |
+| `daily_archives` | `id`, `(instance_id, archive_date) UNIQUE` | 归档包 (tar.gz 或目录; `archive_date`=周起始日或日期; `archive_type`=daily/weekly) |
 | `pitr_chains` | `chain_id` | PITR 链 (base_full_dir + diff_dirs + 时间窗口) |
 | `restore_sessions` | `session_id` | 恢复会话 (target_time + 所需 daily_archives) |
 | `restore_objects` | `(session_id, obs_key)` | 恢复产生的临时对象 (Cleaner 时清理) |
 | `operation_log` | `id` | 操作审计 (run_id / status / error_message) |
 
-### `daily_archives` 核心列 (精简后)
+### `daily_archives` 核心列
 
 | 列 | 类型 | 用途 |
 |---|---|---|
-| `archive_date` | TEXT | 周起始日 (ISO YYYY-MM-DD, 即 `week_start`) |
-| `archive_week_end` | TEXT | 周截止日 (排他, ISO YYYY-MM-DD) |
-| `archive_filename` | TEXT | tar.gz 文件名 (如 `ncbs_busi_W20260530_20260606.tar.gz`) |
-| `status` | TEXT | `pending` (写入中) / `archived` (已落 archive_dir + SHA256 校验) |
-| `checksum_sha256` | TEXT | tar.gz 整体 SHA256 |
+| `archive_date` | TEXT | 周起始日或日期 (ISO YYYY-MM-DD) |
+| `archive_week_end` | TEXT | 周截止日 (排他, 仅 weekly 有值, daily 为 NULL) |
+| `archive_type` | TEXT | `daily` 或 `weekly` |
+| `archive_filename` | TEXT | 文件名 (如 `ncbs_busi_W20260530_20260606.tar.gz` 或 `20260615_ncbs_busi`) |
+| `status` | TEXT | `pending` / `archived` |
+| `checksum_sha256` | TEXT | SHA256 校验值 |
 | `manifest_json` | TEXT | 内嵌的 metadata.json (完整) |
-| `metadata_skipped_count` | INT | 本周跳过的 metadata 数量 |
+| `metadata_skipped_count` | INT | 跳过的 metadata 数量 |
 
-### `backup_objects` 核心列 (精简后)
+### `backup_objects` 核心列
 
 | 列 | 类型 | 用途 |
 |---|---|---|
@@ -914,7 +1015,7 @@ python3 main.py --config config/archive_config.json restore-plan \
 | `parent_backup_dir` | TEXT | 备份时间戳目录名 (如 `1780160839955`) |
 | `status` | TEXT | `discovered` / `queued_for_archive` / `archived` / `obs_deleted` |
 | `restore_policy` | TEXT | `normal` / `archive_only` (metadata 一律 archive_only, 跳过打包) |
-| `daily_archive_id` | INT | 所属 weekly_archive |
+| `daily_archive_id` | INT | 所属 daily_archive |
 | `checksum_sha256` | TEXT | 单对象 SHA256 |
 | `obs_etag` | TEXT | Reaper 二次校验用 |
 | `obs_deleted_at` / `obs_deleted_by` | TEXT | Reaper 标记 |
@@ -926,14 +1027,14 @@ python3 main.py --config config/archive_config.json restore-plan \
 ### `backup_objects.status`
 
 ```
-discovered ──scan──▶ queued_for_archive ──pack_weekly──▶ archived ──reap──▶ obs_deleted
-                                                                          └─[终态]
+discovered ──scan──▶ queued_for_archive ──pack──▶ archived ──reap──▶ obs_deleted
+                                                                     └─[终态]
 ```
 
 ### `daily_archives.status` (二态)
 
 ```
-pending (catalog 行刚创建) ──pack_weekly 写 archive_dir + SHA256 校验──▶ archived
+pending (catalog 行刚创建) ──pack 写 archive_dir + SHA256 校验──▶ archived
 ```
 
 ### `restore_sessions.status`
@@ -949,7 +1050,7 @@ created ──restore──▶ restored ──cleanup──▶ cleaned
 
 ```bash
 # 开发测试 (需要 pytest, 可通过 pip3 install pytest 安装)
-python3 -m pytest tests/ -v   # 141 用例, ~0.4s 全量
+python3 -m pytest tests/ -v   # 148 用例, ~0.4s 全量
 ```
 
 ### 测试矩阵
@@ -958,27 +1059,22 @@ python3 -m pytest tests/ -v   # 141 用例, ~0.4s 全量
 |---|---|---|
 | catalog | test_catalog.py | 14 |
 | cleaner | test_cleaner.py | 5 |
-| cli (基础) | test_cli.py | 6 |
+| cli (基础) | test_cli.py | 9 |
 | cli (确认) | test_cli_confirmation.py | 8 |
 | config | test_config.py | 2 |
 | e2e | test_e2e.py | 4 |
 | errors | test_errors.py | 6 |
 | models | test_models.py | 4 |
 | obs_client | test_obs_client.py | 6 |
-| packer | test_packer.py | 8 |
+| packer (周度+日度) | test_packer.py | 12 |
 | pack-all-weeks | test_pack_all_weeks.py | 3 |
 | policy | test_policy.py | 13 |
 | reaper | test_reaper.py | 5 |
 | restorer | test_restorer.py | 8 |
 | scanner | test_scanner.py | 8 |
 | storage_estimator | test_storage_estimator.py | 15 |
-| utils | test_utils.py | 13 |
-| **合计** | **17 文件** | **141** |
-
-**新增测试覆盖** (相对 115 基础):
-- `test_cli_confirmation.py` (8): `--yes` 标志、交互式确认提示、自动化场景
-- `test_storage_estimator.py` (15): 字节格式化、周分组、磁盘预检、警告生成
-- `test_pack_all_weeks.py` (3): 逐周打包进度、错误继续、`--stop-on-error` 中止
+| utils | test_utils.py | 26 |
+| **合计** | **17 文件** | **148** |
 
 ---
 
@@ -1007,12 +1103,11 @@ python3 -m pytest tests/ -v   # 141 用例, ~0.4s 全量
 - 无网络依赖,本地文件系统模拟 OBS
 - 启动快 (< 1s), 测试快 (~0.4s 全量)
 - 默认所有测试 (`tests/`) 都走 Mock
-- `tests/conftest.py` 预置 Mock OBS fixture
 
 **运行**:
 ```bash
 python3 -m pytest tests/ -v
-# 141/141 通过, ~0.4s
+# 148/148 通过, ~0.4s
 ```
 
 ---
@@ -1058,11 +1153,6 @@ python3 -m pytest tests/test_e2e.py -v --obs-real
 
 **适用场景**: 生产环境正式启用前的全链路演练
 
-**前置条件**:
-- 创建专用测试桶
-- 灌入小规模模拟数据 (如 1 周的 full + diff + xlog)
-- 模拟 catalog 中无残留状态
-
 **流程**:
 ```bash
 # 1. 创建测试桶
@@ -1074,12 +1164,13 @@ obsutil cp obs://dbsbucket-0-tj01-xxxx/prod_data/ obs://dbsbucket-staging-tj01-x
 # 3. 准备测试配置
 cp config/archive_config.json.example config/archive_config_staging.json
 $EDITOR config/archive_config_staging.json
-# 修改 bucket_name, instances[].instance_id 指向测试 instance
 
 # 4. 跑完整流程
 python3 main.py --config config/archive_config_staging.json scan
 python3 main.py --config config/archive_config_staging.json pack-weekly --cluster test_cluster --preview
 python3 main.py --config config/archive_config_staging.json pack-weekly --cluster test_cluster
+python3 main.py --config config/archive_config_staging.json pack-daily --cluster test_cluster --preview
+python3 main.py --config config/archive_config_staging.json pack-daily --cluster test_cluster
 python3 main.py --config config/archive_config_staging.json reap --cluster test_cluster --week-start <date> --dry-run
 python3 main.py --config config/archive_config_staging.json restore-plan --cluster test_cluster --target "<datetime>"
 
@@ -1101,7 +1192,7 @@ obsutil rb obs://dbsbucket-staging-tj01-xxxx
 | 清理成本 | 自动 | `obsutil rm -r` | `obsutil rb` |
 | 凭证 | 不需要 | 测试 AK/SK | 测试 AK/SK |
 | 适用阶段 | 开发/CI | 集成测试 | 生产前验证 |
-| 测试覆盖 | 100% (141 用例) | 4 个 e2e | 手动全链路 |
+| 测试覆盖 | 100% (148 用例) | 4 个 e2e | 手动全链路 |
 | 失败模式覆盖 | 单元注入 | 真实网络抖动 | 真实配额/限流 |
 
 **建议组合**:
@@ -1135,22 +1226,17 @@ obsutil rb obs://dbsbucket-staging-tj01-xxxx
 ### Packer 过滤规则
 
 - `Log/` 目录: 仅取 xlog (`Log/<node>/pg_xlog/tl_*/<seg>/<file>`)
-- 元数据 (5 类 `LOG_NODE_METADATA_FILES` + `recovery_interval/*` + `backup_metadata.cfg`/`incr_backup_metadata.cfg`) 一律 `restore_policy='archive_only'`,**不进** tar.gz
-- xlog 严格按 `[week_start_iso, week_end_iso)` UTC 闭开区间取
+- 元数据 (5 类 `LOG_NODE_METADATA_FILES` + `recovery_interval/*` + `backup_metadata.cfg`/`incr_backup_metadata.cfg`) 一律 `restore_policy='archive_only'`,**不进** tar.gz 或目录
+- xlog 严格按时间窗 UTC 闭开区间取
 
 ### `--yes` 标志安全语义
 
-`--yes` 标志**仅跳过交互式确认**,**不绕过** 任何 5 道门禁。所有安全校验仍会执行,失败仍会硬失败。该标志的设计目的:
-- **不**: 允许绕过安全检查
-- **是**: 允许在 CI/脚本中避免 `stdin` 阻塞
-
-如果配置错误或状态不一致,即使传 `--yes` 也会立即报错退出。
+`--yes` 标志**仅跳过交互式确认**,**不绕过** 任何门禁。所有安全校验仍会执行,失败仍会硬失败。
 
 ### 凭证隔离
 
 - 配置文件只存模板, 真实凭证走 `env:` 占位符
 - `.env` / `config/archive_config.json` / `.omc/` / `.claude/` 已在 `.gitignore`
-- 历史已用 `git-filter-repo` 永久清理 (2026-06-11)
 
 ---
 
@@ -1184,7 +1270,7 @@ obsutil rb obs://dbsbucket-staging-tj01-xxxx
       }
     }
   ],
-  "archive_dir": "/data/tape-mapping",
+  "archive_dir": "/archive",
   "catalog": {
     "path": "/data/catalog/gaussdb_archive.db",
     "backup_enabled": true,
@@ -1193,6 +1279,8 @@ obsutil rb obs://dbsbucket-staging-tj01-xxxx
   },
   "work_dir": "/data/archive_work",
   "archive": {
+    "mode": "weekly",
+    "compress": true,
     "required_manual_confirm_for_delete": true,
     "max_concurrent_pack_jobs": 3,
     "daily_archive_format": "tar.gz",
@@ -1214,10 +1302,18 @@ obsutil rb obs://dbsbucket-staging-tj01-xxxx
 | `archive_snapshot` | 是否归档快照 |
 | `archive_diff` | 是否归档差异备份 (关掉 = 无 PITR) |
 | `archive_xlog` | 是否归档事务日志 (关掉 = 无 PITR) |
-| `retention_days` | 磁带保留天数 (到期后由外部流程覆盖) |
+| `retention_days` | 保留天数 (到期后由外部流程覆盖) |
 | `xlog_redundancy_hours` | xlog 窗口前向冗余 (默认 6h) |
 | `xlog_forward_hours` | xlog 窗口后向冗余 (默认 6h, PITR 必备) |
-| `week_start_day` | **新增** 周度起点 (1=周一..7=周日, 默认 6=周六) |
+| `week_start_day` | 周度起点 (1=周一..7=周日, 默认 6=周六) |
+
+### 归档配置字段
+
+| 字段 | 含义 |
+|---|---|
+| `archive.mode` | 归档模式 (`"weekly"` 或 `"daily"`, 默认 `"weekly"`) |
+| `archive.compress` | 是否压缩 (`true`=tar.gz, `false`=直接目录, 默认 `true`) |
+| `archive.compression_level` | gzip 压缩级别 (0-9, 默认 6) |
 
 **PITR 能力判定**: `archive_full AND archive_diff AND archive_xlog` 全部为 `true` 才支持任意时间点恢复。
 
